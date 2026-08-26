@@ -8,11 +8,12 @@ if providedKey == nil and type(_G) == "table" then providedKey = _G.key end
 if providedKey ~= EXPECTED_KEY then return end
 
 -- =================================================================
--- ENGINE V17 - COMPACT FIXED EDITION (updated)
---   - UI name tags taken from original crystal UI (shows Nexus name)
+-- ENGINE V17 - COMPACT FIXED EDITION (styling from V14 for name tags)
+--   - Name tag UI uses exact styling from original V14 toggle buttons
 --   - scanRadius set to 200 meters
---   - markers include Highlight + BillboardGui name tag
---   - realtime: scan runs every CONFIG.radarInterval and updates tags
+--   - Cache nexus models to avoid full GetDescendants each scan
+--   - Robust detection and realtime updates; fixes radar lag/bugs
+--   - Icon setVisual calls optimized to only run on state changes
 -- =================================================================
 
 local Players      = game:GetService("Players")
@@ -45,6 +46,9 @@ local filterSolar = true
 local filterVoid  = true
 -- markers: [part] = {hl = Highlight, tag = BillboardGui}
 local markers = {}
+
+-- cache of nexus models to avoid expensive workspace:GetDescendants each scan
+local nexusCache = {} -- [modelInstance] = name ("Solar Nexus"/"Void Nexus")
 
 -- ================================================================
 -- SPEED 3X (identik V14)
@@ -81,7 +85,7 @@ task.spawn(function()
 end)
 
 -- ================================================================
--- NEXUS DETECTION (workspace-wide)
+-- NEXUS DETECTION (workspace-wide) with caching
 -- ================================================================
 local function resolvePart(obj)
     if not obj then return nil end
@@ -92,17 +96,85 @@ local function resolvePart(obj)
     return nil
 end
 
-local function getNexusName(obj)
-    -- Naik ke ancestor hingga workspace untuk menemukan model bernama
-    -- "Solar Nexus" atau "Void Nexus". Ini menangani struktur nested.
+local function isNexusName(name)
+    return name == "Solar Nexus" or name == "Void Nexus"
+end
+
+local function cacheAdd(model)
+    if not model or not model.Parent then return end
+    if isNexusName(model.Name) then
+        nexusCache[model] = model.Name
+    end
+end
+
+local function rebuildCache()
+    table.clear(nexusCache)
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if isNexusName(obj.Name) then
+            nexusCache[obj] = obj.Name
+        end
+    end
+end
+
+-- init cache once
+rebuildCache()
+
+-- keep cache fresh incrementally
+workspace.DescendantAdded:Connect(function(obj)
+    -- if any ancestor (including itself) is a named nexus, add the ancestor model
     local cur = obj
     while cur and cur ~= workspace do
-        if cur.Name == "Solar Nexus" or cur.Name == "Void Nexus" then
-            return cur.Name
+        if isNexusName(cur.Name) then
+            nexusCache[cur] = cur.Name
+            break
         end
         cur = cur.Parent
     end
-    return nil
+end)
+
+workspace.DescendantRemoving:Connect(function(obj)
+    -- remove if the removed instance is the model we cached
+    if nexusCache[obj] then
+        nexusCache[obj] = nil
+    end
+end)
+
+-- ================================================================
+-- UI Name tag maker (styling copied from V14 toggle button EXACTLY)
+-- V14 toggle button style: Font=GothamBold, TextSize=7, Bg=C.black,
+-- UICorner radius=5, text color variable
+-- ================================================================
+local function makeNameTag(part, name, color)
+    local bgui = Instance.new("BillboardGui")
+    bgui.Name = "EngineName"
+    bgui.AlwaysOnTop = true
+    bgui.Size = UDim2.new(0, 140, 0, 18)
+    bgui.StudsOffset = Vector3.new(0, 2.2, 0)
+    bgui.Adornee = part
+
+    local b = Instance.new("TextLabel")
+    b.Name = "NameLabel"
+    b.Size = UDim2.new(1, 0, 1, 0)
+    b.BackgroundColor3 = C.black -- exact from V14 toggle buttons
+    b.BorderSizePixel = 0
+    b.Text = name
+    b.TextColor3 = color or Color3.new(1,1,1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 7 -- exact V14
+    b.TextWrapped = false
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.TextYAlignment = Enum.TextYAlignment.Center
+    b.Parent = bgui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0,5)
+    corner.Parent = b
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0,6)
+    pad.Parent = b
+
+    return bgui
 end
 
 local function clearAllMarkers()
@@ -115,32 +187,8 @@ local function clearAllMarkers()
     end
 end
 
-local function makeNameTag(part, name, color)
-    local bgui = Instance.new("BillboardGui")
-    bgui.Name = "EngineName"
-    bgui.AlwaysOnTop = true
-    bgui.Size = UDim2.new(0, 140, 0, 24)
-    bgui.StudsOffset = Vector3.new(0, 2.2, 0)
-    bgui.Adornee = part
-
-    local label = Instance.new("TextLabel")
-    label.Name = "NameLabel"
-    label.Size = UDim2.new(1, 0, 1, 0)
-    label.BackgroundTransparency = 0.25
-    label.BackgroundColor3 = Color3.fromRGB(10,10,12)
-    label.BorderSizePixel = 0
-    label.Text = name
-    label.TextColor3 = color or Color3.new(1,1,1)
-    label.Font = Enum.Font.GothamBold
-    label.TextSize = 14
-    label.TextStrokeTransparency = 0.6
-    label.Parent = bgui
-
-    return bgui
-end
-
 -- ================================================================
--- RADAR SCAN (workspace)
+-- RADAR SCAN (uses cached nexusCache for performance)
 -- ================================================================
 local function scan()
     local char = localPlayer.Character
@@ -148,18 +196,14 @@ local function scan()
     local pos = hrp and hrp.Position or Vector3.zero
     local found = {}
 
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        local nname = getNexusName(obj)
-        if nname then
-            local enabled = (nname == "Solar Nexus" and filterSolar)
-                         or (nname == "Void Nexus" and filterVoid)
-            if enabled then
-                local part = resolvePart(obj)
-                if part and part.Parent then
-                    local ok, d = pcall(function() return (part.Position - pos).Magnitude end)
-                    if ok and d and d <= CONFIG.scanRadius then
-                        found[#found+1] = {part = part, name = nname, d = d}
-                    end
+    -- iterate cached models
+    for model, name in pairs(nexusCache) do
+        if model and model.Parent then
+            local part = resolvePart(model)
+            if part and part.Parent then
+                local ok, d = pcall(function() return (part.Position - pos).Magnitude end)
+                if ok and d and d <= CONFIG.scanRadius then
+                    found[#found+1] = {part = part, name = name, d = d, model = model}
                 end
             end
         end
@@ -183,18 +227,18 @@ local function scan()
             m.FillTransparency = 0.55
             m.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
             m.Parent = part
-            markers[part] = data
             data.hl = m
-            -- name tag UI (billboard)
+            -- name tag UI (billboard) styled exactly like V14
             local col = (entry.name == "Solar Nexus") and SOLAR_COLOR or VOID_COLOR
             local tag = makeNameTag(part, entry.name, col)
             tag.Parent = part
             data.tag = tag
+            markers[part] = data
         else
-            -- update existing: ensure parented and adornee correct
+            -- ensure parent and adornee are correct
             if data.hl and not data.hl.Parent then data.hl.Parent = part end
             if data.tag and not data.tag.Parent then data.tag.Parent = part end
-            data.tag.Adornee = part
+            if data.tag then data.tag.Adornee = part end
         end
         -- color/outline sync
         if data.hl then
@@ -203,7 +247,7 @@ local function scan()
             data.hl.Adornee = part
         end
         if data.tag then
-            -- update text with distance realtime
+            -- update text with distance realtime (rounded down) but keep name UI styling
             local label = data.tag:FindFirstChild("NameLabel")
             if label then
                 label.Text = entry.name .. "  (" .. math.floor(entry.d) .. "m)"
@@ -224,6 +268,14 @@ local function scan()
     end
 end
 
+-- immediate scan on toggle to avoid waiting interval
+local function startRadar()
+    if radarOn then
+        pcall(scan)
+    end
+end
+
+-- scanning loop (lightweight now because we iterate cached models only)
 task.spawn(function()
     while true do
         if radarOn then pcall(scan) end
@@ -262,7 +314,7 @@ tbFix.BackgroundColor3 = C.accent; tbFix.BackgroundTransparency = 0.25; tbFix.Bo
 
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1,-52,1,0); titleLabel.Position = UDim2.new(0,10,0,0)
-titleLabel.Text = "⚡ Engine V17"; titleLabel.TextColor3 = Color3.new(1,1,1)
+titleLabel.Text = "��� Engine V17"; titleLabel.TextColor3 = Color3.new(1,1,1)
 titleLabel.TextSize = 12; titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left; titleLabel.BackgroundTransparency = 1
 
@@ -274,7 +326,7 @@ minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 11; minBtn.BorderSizePixel
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0,6)
 
 -- ------------------------------------------------------------
--- KIRI: ikon toggle (persis V14)
+-- KIRI: ikon toggle (persis V14) with optimized setVisual
 -- ------------------------------------------------------------
 local leftCol = Instance.new("Frame", outer)
 leftCol.Size = UDim2.new(0,48,1,-38); leftCol.Position = UDim2.new(0,6,0,34)
@@ -295,7 +347,11 @@ local function makeIconButton(yPos, icon, gradA, gradB)
     local grad = Instance.new("UIGradient", btn)
     grad.Color = ColorSequence.new(gradB, gradB)
     grad.Transparency = NumberSequence.new(0.88)
+    -- optimized setVisual: only update if state changed
+    local currentState = false
     local function setVisual(on)
+        if currentState == on then return end
+        currentState = on
         if on then
             grad.Color = ColorSequence.new(gradA, gradB)
             grad.Transparency = NumberSequence.new(0.15)
@@ -377,7 +433,7 @@ solarBtn.MouseButton1Click:Connect(function()
     solarBtn.TextColor3 = filterSolar and Color3.new(1,1,1) or C.textSub
     clearAllMarkers()
     updateFilterStatus()
-    if radarOn then pcall(scan) end
+    if radarOn then startRadar() end
 end)
 
 voidBtn.MouseButton1Click:Connect(function()
@@ -386,7 +442,7 @@ voidBtn.MouseButton1Click:Connect(function()
     voidBtn.TextColor3 = filterVoid and Color3.new(1,1,1) or C.textSub
     clearAllMarkers()
     updateFilterStatus()
-    if radarOn then pcall(scan) end
+    if radarOn then startRadar() end
 end)
 
 speedBtn.MouseButton1Click:Connect(function()
@@ -403,7 +459,11 @@ end)
 radarBtn.MouseButton1Click:Connect(function()
     radarOn = not radarOn
     setRadarVis(radarOn)
-    if not radarOn then clearAllMarkers() end
+    if not radarOn then
+        clearAllMarkers()
+    else
+        startRadar() -- immediate scan so we don't wait interval
+    end
 end)
 
 minBtn.MouseButton1Click:Connect(function()
@@ -447,4 +507,4 @@ end
 makeDraggable(outer)
 makeDraggable(miniBubble)
 
-print("ENGINE V17 - LOADED ✔ (UI V14 asli | Radar: Solar Nexus + Void Nexus workspace)")
+print("ENGINE V17 - LOADED ✔ (UI V14 styling for name tags | optimized radar)")
