@@ -1,0 +1,725 @@
+-- =================================================================
+-- ENGINE V14 - COMPACT FIXED EDITION (Delta self-contained)
+--   ✅ UI digabung (Fluent adapter) sehingga satu file: langsung paste ke executor (Delta/Excavator)
+--   Semua logic (scan, filter, speed, luck, markers) TIDAK diubah.
+-- =================================================================
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local localPlayer = Players.LocalPlayer
+
+local CONFIG = {
+    normalSpeed   = 16,
+    boostMult     = 3,
+    radarInterval = 0.15,
+    maxMarkers    = 50,
+    scanRadius    = 100,
+}
+
+local LUCK = {
+    RarityMult = {1, 1.6, 2.6, 4.2, 7, 12, 216, 480, 600},
+    Base       = 0.00045,
+    WeightExp  = 0.5,
+    KgCap      = 500,
+    BombMult   = 3,
+    BloodMult  = 4,
+}
+
+local RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary" }
+-- Category baru diposisikan DI ATAS Mythic:
+local CATEGORIES = { "Empiris", "Pulsar", "Quasar" }
+local MYTHIC = "Mythic"
+
+local SIZES = { "Small", "Medium", "Large", "Huge" }
+
+local RARITY_COLORS = {
+    Common=Color3.fromRGB(180,180,180), Uncommon=Color3.fromRGB(90,200,90),
+    Rare=Color3.fromRGB(70,140,255), Epic=Color3.fromRGB(170,80,255),
+    Legendary=Color3.fromRGB(255,170,40), Mythic=Color3.fromRGB(255,60,130),
+    Empiris=Color3.fromRGB(0,255,200), Pulsar=Color3.fromRGB(255,220,0),
+    Quasar=Color3.fromRGB(255,80,80),
+}
+
+local C = {
+    bg=Color3.fromRGB(8,8,10), black=Color3.fromRGB(14,14,16),
+    accent=Color3.fromRGB(88,101,242), green=Color3.fromRGB(87,242,135),
+    orange=Color3.fromRGB(254,160,60), purple=Color3.fromRGB(180,80,220),
+    red=Color3.fromRGB(237,66,69), teal=Color3.fromRGB(40,190,180),
+    textMain=Color3.fromRGB(235,238,245), textSub=Color3.fromRGB(130,136,148),
+}
+
+local speedOn, radarOn = false, false
+local filterRarityMin = 0
+local wantMythic      = false
+local filterMinLucky  = nil          -- nil = semua; angka = EXACT match
+local selectedCategories = {}
+local selectedSizes      = {}
+local markers = {}
+
+-- ================================================================
+-- SPEED 3X
+-- ================================================================
+local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
+
+local currentConn = nil
+local function hookHumanoid()
+    if currentConn then currentConn:Disconnect() currentConn = nil end
+    local hum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    currentConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if speedOn and hum.WalkSpeed ~= targetSpeed() then hum.WalkSpeed = targetSpeed() end
+    end)
+    hum.WalkSpeed = targetSpeed()
+end
+
+RunService.Heartbeat:Connect(function()
+    if not speedOn then return end
+    local hum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.WalkSpeed ~= targetSpeed() then hum.WalkSpeed = targetSpeed() end
+end)
+
+localPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if speedOn then hookHumanoid() end
+end)
+
+task.spawn(function()
+    while true do
+        if speedOn then hookHumanoid() end
+        task.wait(2)
+    end
+end)
+
+-- ================================================================
+-- BACA INFO CRYSTAL (tanpa auto-detect — fixed keys)
+-- ================================================================
+local function getCrystalCategory(part)
+    for _, k in ipairs({"CrystalName","CrystalType","Type","Kind"}) do
+        local v = part:GetAttribute(k)
+        if type(v) == "string" and v ~= "" then return v end
+    end
+    local tn = tostring(part:GetAttribute("TierName") or "")
+    for _, cat in ipairs(CATEGORIES) do
+        if tn:lower():find(cat:lower(), 1, true) then return cat end
+    end
+    return nil
+end
+
+local function getCrystalSize(part)
+    for _, k in ipairs({"Size","CrystalSize","SizeCategory"}) do
+        local v = part:GetAttribute(k)
+        if type(v) == "string" and v ~= "" then return v end
+    end
+    local tn = tostring(part:GetAttribute("TierName") or "")
+    for _, sz in ipairs(SIZES) do
+        if tn:find(sz, 1, true) then return sz end
+    end
+    return nil
+end
+
+-- ================================================================
+-- LUCKY — EXACT MATCH
+--   filterMinLucky = 2.0 → hanya luck TEPAT 2.0 yang lolos
+--   (toleransi 0.001 untuk pembulatan float)
+-- ================================================================
+local function getLuckScore(part)
+    for _, key in ipairs({"CrystalLuck","LuckValue","Luck","Lucky"}) do
+        local v = part:GetAttribute(key)
+        if type(v) == "number" and v > 0 then return v end
+    end
+
+    local tier = tonumber(part:GetAttribute("Tier")) or 1
+    local kg = tonumber(part:GetAttribute("LuckKg"))
+             or tonumber(part:GetAttribute("WeightKg")) or 0
+    kg = math.max(0, kg)
+
+    local rm = LUCK.RarityMult[tier] or LUCK.RarityMult[1]
+    local raw = rm * math.min(kg, LUCK.KgCap) ^ LUCK.WeightExp * LUCK.Base
+
+    local mult = tonumber(part:GetAttribute("MutationLuckRoll")) or 1
+    if part:GetAttribute("BombCrystal") == true then mult = mult * LUCK.BombMult end
+    if part:GetAttribute("IsBloodCrystal") == true then mult = mult * LUCK.BloodMult end
+
+    return math.max(raw, raw * mult, rm * mult)
+end
+
+local function passesLucky(part)
+    if not filterMinLucky then return true end
+    local score = getLuckScore(part)
+    return math.abs(score - filterMinLucky) <= 0.001   -- EXACT saja
+end
+
+-- ================================================================
+-- FILTER GABUNGAN
+-- ================================================================
+local function getRarityIndex(part)
+    local tn = tostring(part:GetAttribute("TierName") or "")
+    for i, r in ipairs(RARITIES) do
+        if tn:lower():find(r:lower(), 1, true) then return i end
+    end
+    if tn:lower():find(MYTHIC:lower(), 1, true) then return 99 end
+    return -1
+end
+
+local function passesFilter(part)
+    -- Rarity biasa
+    if filterRarityMin > 0 then
+        local ri = getRarityIndex(part)
+        local isMythic = (ri == 99)
+        if isMythic then
+            if not wantMythic then return false end
+        elseif ri < filterRarityMin then
+            return false
+        end
+    end
+    -- Category (Empiris/Pulsar/Quasar)
+    if next(selectedCategories) then
+        local cat = getCrystalCategory(part)
+        if not cat or not selectedCategories[cat] then return false end
+    end
+    -- Size
+    if next(selectedSizes) then
+        local sz = getCrystalSize(part)
+        if not sz or not selectedSizes[sz] then return false end
+    end
+    return passesLucky(part)
+end
+
+local function markerColor(part)
+    local r = tonumber(part:GetAttribute("TierColorR"))
+    local g = tonumber(part:GetAttribute("TierColorG"))
+    local b = tonumber(part:GetAttribute("TierColorB"))
+    if r and g and b then return Color3.fromRGB(r,g,b) end
+    local tn = tostring(part:GetAttribute("TierName") or "")
+    for name, col in pairs(RARITY_COLORS) do
+        if tn:lower():find(name:lower(), 1, true) then return col end
+    end
+    return Color3.fromRGB(200,210,230)
+end
+
+-- ================================================================
+-- RADAR SCAN
+-- ================================================================
+local function clearAllMarkers()
+    for part, m in pairs(markers) do
+        pcall(function() m:Destroy() end)
+        markers[part] = nil
+    end
+end
+
+local function findCrystalFolder()
+    local things = workspace:FindFirstChild("Things")
+    local c = things and things:FindFirstChild("Crystals")
+    if c then return c end
+    return workspace:FindFirstChild("Crystals", true)
+end
+
+local function scan()
+    local char = localPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local folder = findCrystalFolder()
+    if not folder then clearAllMarkers() return end
+
+    local pos = hrp and hrp.Position or Vector3.zero
+    local found = {}
+
+    for _, part in ipairs(folder:GetDescendants()) do
+        if part:IsA("BasePart") and part:GetAttribute("TierName") ~= nil
+        and passesFilter(part) then
+            local d = hrp and (part.Position - pos).Magnitude or 0
+            if d <= CONFIG.scanRadius then
+                found[#found+1] = {part=part, d=d}
+            end
+        end
+    end
+
+    table.sort(found, function(a,b) return a.d < b.d end)
+
+    local keep = {}
+    local n = math.min(#found, CONFIG.maxMarkers)
+    for i = 1, n do
+        local part = found[i].part
+        keep[part] = true
+        local m = markers[part]
+        if not m or not m.Parent then
+            m = Instance.new("Highlight")
+            m.Name = "EngineHL"
+            m.FillTransparency = 0.55
+            m.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            markers[part] = m
+        end
+        local col = markerColor(part)
+        m.FillColor = col; m.OutlineColor = col
+        m.Adornee = part; m.Parent = part
+    end
+    for part in pairs(markers) do
+        if not (keep[part] and part.Parent) then
+            pcall(function() markers[part]:Destroy() end)
+            markers[part] = nil
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        if radarOn then pcall(scan) end
+        task.wait(CONFIG.radarInterval)
+    end
+end)
+
+-- ================================================================
+-- Fluent adapter (embedded) - self-contained for Delta/Excavator
+-- Provides minimal API: CreateWindow, AddGroup, AddToggle, AddGrid, AddRow, AddInput, AddButton, AddLabel
+-- ================================================================
+local function buildFluentAdapter()
+    local Fluent = {}
+
+    local function ensureGui()
+        local pg = localPlayer and localPlayer:FindFirstChild("PlayerGui")
+        if not pg then pg = localPlayer:WaitForChild("PlayerGui") end
+        local gui = pg:FindFirstChild("FluentUI_Adapter")
+        if gui and gui:IsA("ScreenGui") then return gui end
+        gui = Instance.new("ScreenGui")
+        gui.Name = "FluentUI_Adapter"
+        gui.ResetOnSpawn = false
+        gui.DisplayOrder = 9999
+        gui.Parent = pg
+        return gui
+    end
+
+    local function makeFrame(parent, size, pos)
+        local f = Instance.new("Frame")
+        f.Size = size or UDim2.fromOffset(360, 240)
+        if pos then f.Position = pos end
+        f.BackgroundColor3 = Color3.fromRGB(18,18,20)
+        f.BorderSizePixel = 0
+        f.Parent = parent
+        local corner = Instance.new("UICorner", f)
+        corner.CornerRadius = UDim.new(0,8)
+        return f
+    end
+
+    local function makeLabel(parent, text)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -8, 0, 18)
+        lbl.Position = UDim2.new(0, 4, 0, 4)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text or ""
+        lbl.TextColor3 = Color3.fromRGB(230,230,230)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = parent
+        function lbl:SetText(t) self.Text = tostring(t) end
+        return lbl
+    end
+
+    function Fluent.CreateWindow(opts)
+        opts = opts or {}
+        local gui = ensureGui()
+        local main = makeFrame(gui, UDim2.fromOffset(opts.Size and opts.Size.X or 360, opts.Size and opts.Size.Y or 240), opts.Position)
+
+        local title = Instance.new("TextLabel", main)
+        title.Size = UDim2.new(1, -12, 0, 28)
+        title.Position = UDim2.new(0, 6, 0, 6)
+        title.BackgroundTransparency = 1
+        title.Text = opts.Title or "Window"
+        title.TextColor3 = Color3.fromRGB(250,250,250)
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 14
+        title.TextXAlignment = Enum.TextXAlignment.Left
+
+        local content = Instance.new("Frame", main)
+        content.Size = UDim2.new(1, -12, 1, -40)
+        content.Position = UDim2.new(0, 6, 0, 36)
+        content.BackgroundTransparency = 1
+
+        local layout = Instance.new("UIListLayout", content)
+        layout.FillDirection = Enum.FillDirection.Vertical
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, 6)
+
+        local window = {}
+
+        function window:AddGroup(titleText, groupOpts)
+            local groupFrame = Instance.new("Frame", content)
+            groupFrame.Size = UDim2.new(1, 0, 0, 0)
+            groupFrame.BackgroundTransparency = 1
+            groupFrame.LayoutOrder = #content:GetChildren()
+
+            local gLayout = Instance.new("UIListLayout", groupFrame)
+            gLayout.FillDirection = Enum.FillDirection.Vertical
+            gLayout.SortOrder = Enum.SortOrder.LayoutOrder
+            gLayout.Padding = UDim.new(0, 4)
+
+            local header = makeLabel(groupFrame, titleText or "Group")
+            header.LayoutOrder = 1
+
+            local container = Instance.new("Frame", groupFrame)
+            container.BackgroundTransparency = 1
+            container.Size = UDim2.new(1, 0, 0, 1)
+            container.LayoutOrder = 2
+
+            local gridLayout = Instance.new("UIGridLayout", container)
+            gridLayout.CellSize = UDim2.new(0, 120, 0, 24)
+            gridLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+
+            local group = {}
+
+            function group:AddToggle(label, initial, callback)
+                local btn = Instance.new("TextButton")
+                btn.Size = UDim2.fromOffset(120, 24)
+                btn.BackgroundColor3 = initial and Color3.fromRGB(80,160,255) or Color3.fromRGB(35,35,38)
+                btn.TextColor3 = Color3.fromRGB(240,240,240)
+                btn.Text = label or "Toggle"
+                btn.Font = Enum.Font.GothamBold
+                btn.TextSize = 12
+                btn.Parent = container
+                btn:SetAttribute("state", initial == true)
+                btn.MouseButton1Click:Connect(function()
+                    local new = not btn:GetAttribute("state")
+                    btn:SetAttribute("state", new)
+                    btn.BackgroundColor3 = new and Color3.fromRGB(80,160,255) or Color3.fromRGB(35,35,38)
+                    if callback then
+                        pcall(callback, new)
+                    end
+                end)
+                return btn
+            end
+
+            function group:AddGrid(cols)
+                local grid = {}
+                function grid:AddToggle(label, initial, callback)
+                    return group:AddToggle(label, initial, callback)
+                end
+                return grid
+            end
+
+            function group:AddRow()
+                local row = {}
+                function row:AddToggle(label, initial, callback)
+                    return group:AddToggle(label, initial, callback)
+                end
+                function row:AddButton(label, callback)
+                    local b = Instance.new("TextButton")
+                    b.Size = UDim2.fromOffset(80, 22)
+                    b.BackgroundColor3 = Color3.fromRGB(60,60,64)
+                    b.TextColor3 = Color3.fromRGB(240,240,240)
+                    b.Font = Enum.Font.GothamBold
+                    b.TextSize = 12
+                    b.Text = label or "Btn"
+                    b.Parent = container
+                    b.MouseButton1Click:Connect(function() pcall(callback) end)
+                    return b
+                end
+                function row:AddInput(placeholder, text, onChange)
+                    local tb = Instance.new("TextBox")
+                    tb.Size = UDim2.fromOffset(140, 22)
+                    tb.PlaceholderText = placeholder or ""
+                    tb.Text = text or ""
+                    tb.BackgroundColor3 = Color3.fromRGB(28,28,30)
+                    tb.TextColor3 = Color3.fromRGB(240,240,240)
+                    tb.Font = Enum.Font.Gotham
+                    tb.TextSize = 12
+                    tb.Parent = container
+                    tb.ClearTextOnFocus = false
+                    tb.FocusLost:Connect(function()
+                        if onChange then pcall(onChange, tb.Text) end
+                    end)
+                    function tb:SetText(t) tb.Text = tostring(t or "") end
+                    return tb
+                end
+                return row
+            end
+
+            function group:AddInput(placeholder, text, onChange)
+                local tb = Instance.new("TextBox")
+                tb.Size = UDim2.fromOffset(200, 24)
+                tb.PlaceholderText = placeholder or ""
+                tb.Text = text or ""
+                tb.BackgroundColor3 = Color3.fromRGB(28,28,30)
+                tb.TextColor3 = Color3.fromRGB(240,240,240)
+                tb.Font = Enum.Font.Gotham
+                tb.TextSize = 12
+                tb.Parent = container
+                tb.ClearTextOnFocus = false
+                tb.FocusLost:Connect(function()
+                    if onChange then pcall(onChange, tb.Text) end
+                end)
+                function tb:SetText(t) tb.Text = tostring(t or "") end
+                return tb
+            end
+
+            function group:AddButton(label, callback)
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.fromOffset(80, 24)
+                b.BackgroundColor3 = Color3.fromRGB(180,60,60)
+                b.TextColor3 = Color3.fromRGB(250,250,250)
+                b.Font = Enum.Font.GothamBold
+                b.TextSize = 12
+                b.Text = label or "Btn"
+                b.Parent = container
+                b.MouseButton1Click:Connect(function() pcall(callback) end)
+                return b
+            end
+
+            function group:AddLabel(text)
+                local l = Instance.new("TextLabel")
+                l.Size = UDim2.fromOffset(200, 18)
+                l.BackgroundTransparency = 1
+                l.Text = text or ""
+                l.TextColor3 = Color3.fromRGB(160,255,160)
+                l.Font = Enum.Font.GothamBold
+                l.TextSize = 12
+                l.Parent = container
+                function l:SetText(t) l.Text = tostring(t) end
+                return l
+            end
+
+            return group
+        end
+
+        return window
+    end
+
+    return Fluent
+end
+
+local Fluent = buildFluentAdapter()
+
+-- ================================================================
+-- GUI (using embedded Fluent adapter)
+-- ================================================================
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- Keep these for compatibility with existing handlers (we'll wire them to new UI)
+local toggleButtons = {} -- [nama] = {btn = object, get = function}
+
+local function updateFilterStatus()
+    local parts = {}
+    if filterRarityMin > 0 then table.insert(parts, RARITIES[filterRarityMin].."+") end
+    if wantMythic then table.insert(parts, "Mythic") end
+    local nc, ns = 0, 0
+    for _ in pairs(selectedCategories) do nc += 1 end
+    for _ in pairs(selectedSizes) do ns += 1 end
+    if nc > 0 then table.insert(parts, nc.." cat") end
+    if ns > 0 then table.insert(parts, ns.." size") end
+    if filterMinLucky then
+        local v = filterMinLucky
+        local txt = (v == math.floor(v)) and ("%g"):format(v) or ("%.1f"):format(v)
+        table.insert(parts, "Luck="..txt.." exact")
+    end
+    if _G and _G.EngineFilterStatusExternal then
+        pcall(_G.EngineFilterStatusExternal, table.concat(parts, " | "))
+    end
+end
+
+local function refreshToggles()
+    for name, data in pairs(toggleButtons) do
+        if data.get and data.setVisual then
+            data.setVisual(data.get())
+        elseif data.get and data.btn then
+            data.btn.BackgroundColor3 = data.get() and (RARITY_COLORS[name] or C.accent) or C.black
+        end
+    end
+end
+
+if Fluent and Fluent.CreateWindow then
+    local window = Fluent.CreateWindow({Title = "Engine V14", Size = Vector2.new(360,240), Compact = true})
+
+    -- Left column: speed & radar
+    local leftGroup = window:AddGroup("Actions", {Width = 80})
+    local speedToggle = leftGroup:AddToggle("Speed 3x", speedOn, function(state)
+        speedOn = state
+        if speedOn then hookHumanoid() end
+    end)
+    toggleButtons["__speed"] = {btn = speedToggle, get = function() return speedOn end, setVisual = function(s) end}
+
+    local radarToggle = leftGroup:AddToggle("Radar", radarOn, function(state)
+        radarOn = state
+        if not radarOn then clearAllMarkers() end
+    end)
+    toggleButtons["__radar"] = {btn = radarToggle, get = function() return radarOn end}
+
+    -- Right: filters
+    local filterGroup = window:AddGroup("Filter", {Width = 260})
+
+    -- Rarity toggles
+    local rarityGrid = filterGroup:AddGrid(6)
+    for i, r in ipairs(RARITIES) do
+        local v = (filterRarityMin == i)
+        local btn = rarityGrid:AddToggle(r, v, function(state)
+            if state then filterRarityMin = i else filterRarityMin = 0 end
+            refreshToggles(); updateFilterStatus()
+            if radarOn then pcall(scan) end
+        end)
+        toggleButtons[r] = {btn = btn, get = function() return filterRarityMin == i end}
+    end
+    -- Mythic
+    local mythBtn = rarityGrid:AddToggle(MYTHIC, wantMythic, function(state)
+        wantMythic = state
+        refreshToggles(); updateFilterStatus()
+        if radarOn then pcall(scan) end
+    end)
+    toggleButtons[MYTHIC] = {btn = mythBtn, get = function() return wantMythic end}
+
+    -- Categories
+    for _, cat in ipairs(CATEGORIES) do
+        local v = selectedCategories[cat] == true
+        local b = rarityGrid:AddToggle(cat, v, function(state)
+            if state then selectedCategories[cat] = true else selectedCategories[cat] = nil end
+            refreshToggles(); updateFilterStatus()
+            if radarOn then pcall(scan) end
+        end)
+        toggleButtons[cat] = {btn = b, get = function() return selectedCategories[cat] == true end}
+    end
+
+    -- Sizes row
+    local sizeRow = filterGroup:AddRow()
+    for _, sz in ipairs(SIZES) do
+        local b = sizeRow:AddToggle(sz, selectedSizes[sz] == true, function(state)
+            if state then selectedSizes[sz] = true else selectedSizes[sz] = nil end
+            updateFilterStatus(); if radarOn then pcall(scan) end
+        end)
+        toggleButtons[sz] = {btn = b, get = function() return selectedSizes[sz] == true end}
+    end
+
+    -- Lucky input + clear + reset
+    local luckyRow = filterGroup:AddRow()
+    local luckyInput = luckyRow:AddInput("Lucky exact", tostring(filterMinLucky or ""), function(text)
+        local txt = tostring(text):gsub("[%s,]", "")
+        if txt == "" then
+            filterMinLucky = nil
+        else
+            local v = tonumber(txt)
+            filterMinLucky = v
+        end
+        updateFilterStatus(); if radarOn then pcall(scan) end
+    end)
+    local clearBtn = luckyRow:AddButton("Clear", function()
+        filterMinLucky = nil
+        luckyInput:SetText("")
+        updateFilterStatus(); if radarOn then pcall(scan) end
+    end)
+    local resetBtn = luckyRow:AddButton("Reset", function()
+        filterRarityMin, wantMythic = 0, false
+        filterMinLucky = nil
+        selectedCategories = {}
+        selectedSizes = {}
+        luckyInput:SetText("")
+        refreshToggles(); updateFilterStatus(); if radarOn then pcall(scan) end
+    end)
+
+    -- Status
+    local status = filterGroup:AddLabel("Filter: SEMUA")
+    do
+        local orig = updateFilterStatus
+        updateFilterStatus = function()
+            orig()
+            local parts = {}
+            if filterRarityMin > 0 then table.insert(parts, RARITIES[filterRarityMin].."+") end
+            if wantMythic then table.insert(parts, "Mythic") end
+            local nc, ns = 0, 0
+            for _ in pairs(selectedCategories) do nc += 1 end
+            for _ in pairs(selectedSizes) do ns += 1 end
+            if nc > 0 then table.insert(parts, nc.." cat") end
+            if ns > 0 then table.insert(parts, ns.." size") end
+            if filterMinLucky then
+                local v = filterMinLucky
+                local txt = (v == math.floor(v)) and ("%g"):format(v) or ("%.1f"):format(v)
+                table.insert(parts, "Luck="..txt.." exact")
+            end
+            status:SetText((#parts > 0) and table.concat(parts, " | ") or "Filter: SEMUA")
+        end
+    end
+
+    refreshToggles(); updateFilterStatus()
+else
+    -- Fallback UI (very small) if adapter missing — should not happen here
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "EngineGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 9999
+    screenGui.Parent = playerGui
+
+    local outer = Instance.new("Frame", screenGui)
+    outer.Size = UDim2.new(0, 360, 0, 240)
+    outer.Position = UDim2.new(0, 12, 0.5, -120)
+    outer.BackgroundColor3 = C.bg; outer.BorderSizePixel = 0; outer.Active = true
+    Instance.new("UICorner", outer).CornerRadius = UDim.new(0, 16)
+    local oStroke = Instance.new("UIStroke", outer)
+    oStroke.Color = Color3.fromRGB(45,45,52); oStroke.Thickness = 1
+
+    local titleBar = Instance.new("Frame", outer)
+    titleBar.Size = UDim2.new(1,0,0,28); titleBar.BackgroundColor3 = C.accent
+    titleBar.BackgroundTransparency = 0.25; titleBar.BorderSizePixel = 0
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0,16)
+
+    local titleLabel = Instance.new("TextLabel", titleBar)
+    titleLabel.Size = UDim2.new(1,-52,1,0); titleLabel.Position = UDim2.new(0,10,0,0)
+    titleLabel.Text = "⚡ Engine V14"; titleLabel.TextColor3 = Color3.new(1,1,1)
+    titleLabel.TextSize = 12; titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left; titleLabel.BackgroundTransparency = 1
+
+    local speedBtn = Instance.new("TextButton", outer)
+    speedBtn.Size = UDim2.new(0,80,0,28); speedBtn.Position = UDim2.new(0,8,0,40)
+    speedBtn.Text = "Speed 3x"; speedBtn.Font = Enum.Font.GothamBold; speedBtn.TextSize = 12
+    speedBtn.BackgroundColor3 = C.black; speedBtn.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", speedBtn).CornerRadius = UDim.new(0,6)
+
+    local radarBtn = Instance.new("TextButton", outer)
+    radarBtn.Size = UDim2.new(0,80,0,28); radarBtn.Position = UDim2.new(0,96,0,40)
+    radarBtn.Text = "Radar"; radarBtn.Font = Enum.Font.GothamBold; radarBtn.TextSize = 12
+    radarBtn.BackgroundColor3 = C.black; radarBtn.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", radarBtn).CornerRadius = UDim2.new(0,6)
+
+    local function setBtnState(btn, on)
+        btn.BackgroundColor3 = on and C.accent or C.black
+    end
+
+    speedBtn.MouseButton1Click:Connect(function()
+        speedOn = not speedOn; setBtnState(speedBtn, speedOn)
+        if speedOn then hookHumanoid() else
+            local hum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = CONFIG.normalSpeed end
+        end
+    end)
+    radarBtn.MouseButton1Click:Connect(function()
+        radarOn = not radarOn; setBtnState(radarBtn, radarOn)
+        if not radarOn then clearAllMarkers() end
+    end)
+
+    local filterStatus = Instance.new("TextLabel", outer)
+    filterStatus.Size = UDim2.new(1,-16,0,40)
+    filterStatus.Position = UDim2.new(0,8,0,76)
+    filterStatus.Text = "Filter: SEMUA"; filterStatus.TextColor3 = C.green
+    filterStatus.TextSize = 12; filterStatus.Font = Enum.Font.GothamBold
+    filterStatus.BackgroundTransparency = 1
+
+    do
+        local orig = updateFilterStatus
+        updateFilterStatus = function()
+            orig()
+            local parts = {}
+            if filterRarityMin > 0 then table.insert(parts, RARITIES[filterRarityMin].."+") end
+            if wantMythic then table.insert(parts, "Mythic") end
+            local nc, ns = 0, 0
+            for _ in pairs(selectedCategories) do nc += 1 end
+            for _ in pairs(selectedSizes) do ns += 1 end
+            if nc > 0 then table.insert(parts, nc.." cat") end
+            if ns > 0 then table.insert(parts, ns.." size") end
+            if filterMinLucky then
+                local v = filterMinLucky
+                local txt = (v == math.floor(v)) and ("%g"):format(v) or ("%.1f"):format(v)
+                table.insert(parts, "Luck="..txt.." exact")
+            end
+            filterStatus.Text = (#parts > 0) and table.concat(parts, " | ") or "Filter: SEMUA"
+        end
+    end
+
+    updateFilterStatus()
+end
+
+print("ENGINE V14 - LOADED ✔ (Delta self-contained UI)")
