@@ -8,12 +8,11 @@ if providedKey == nil and type(_G) == "table" then providedKey = _G.key end
 if providedKey ~= EXPECTED_KEY then return end
 
 -- =================================================================
--- ENGINE V17 - COMPACT FIXED EDITION
---   ✅ Berbasis 100% dari code ORIGINAL V14 (yang sudah work)
---   ✅ Radar deteksi workspace: "Solar Nexus" & "Void Nexus"
---   ✅ Semua nama filter lama (Rarity/Category/Size/Lucky) DIHAPUS
---   ✅ Ganti dengan 2 tombol filter warna-warni: Solar / Void
---   ✅ UI kecil, warna-warni, drag — persis seperti lama
+-- ENGINE V17 - COMPACT FIXED EDITION (updated)
+--   - UI name tags taken from original crystal UI (shows Nexus name)
+--   - scanRadius set to 200 meters
+--   - markers include Highlight + BillboardGui name tag
+--   - realtime: scan runs every CONFIG.radarInterval and updates tags
 -- =================================================================
 
 local Players      = game:GetService("Players")
@@ -27,7 +26,7 @@ local CONFIG = {
     boostMult     = 3,
     radarInterval = 0.15,
     maxMarkers    = 50,
-    scanRadius    = 1000, -- dinaikkan biar nexus jauh tetap kedeteksi
+    scanRadius    = 200, -- changed to 200m as requested
 }
 
 local C = {
@@ -44,6 +43,7 @@ local VOID_COLOR  = Color3.fromRGB(180,80,220) -- ungu
 local speedOn, radarOn = false, false
 local filterSolar = true
 local filterVoid  = true
+-- markers: [part] = {hl = Highlight, tag = BillboardGui}
 local markers = {}
 
 -- ================================================================
@@ -82,10 +82,9 @@ end)
 
 -- ================================================================
 -- NEXUS DETECTION (workspace-wide)
---   Deteksi BasePart/Model/Tool bernama "Solar Nexus"/"Void Nexus",
---   termasuk anak-anaknya (child part dari model).
 -- ================================================================
 local function resolvePart(obj)
+    if not obj then return nil end
     if obj:IsA("BasePart") then return obj end
     if obj:IsA("Model") then
         return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
@@ -94,22 +93,50 @@ local function resolvePart(obj)
 end
 
 local function getNexusName(obj)
-    if obj.Name == "Solar Nexus" or obj.Name == "Void Nexus" then
-        return obj.Name
-    end
-    -- cek parent langsung (part child dari model nexus)
-    local p = obj.Parent
-    if p and (p.Name == "Solar Nexus" or p.Name == "Void Nexus") then
-        return p.Name
+    -- Naik ke ancestor hingga workspace untuk menemukan model bernama
+    -- "Solar Nexus" atau "Void Nexus". Ini menangani struktur nested.
+    local cur = obj
+    while cur and cur ~= workspace do
+        if cur.Name == "Solar Nexus" or cur.Name == "Void Nexus" then
+            return cur.Name
+        end
+        cur = cur.Parent
     end
     return nil
 end
 
 local function clearAllMarkers()
-    for part, m in pairs(markers) do
-        pcall(function() m:Destroy() end)
+    for part, data in pairs(markers) do
+        pcall(function()
+            if data.hl then data.hl:Destroy() end
+            if data.tag then data.tag:Destroy() end
+        end)
         markers[part] = nil
     end
+end
+
+local function makeNameTag(part, name, color)
+    local bgui = Instance.new("BillboardGui")
+    bgui.Name = "EngineName"
+    bgui.AlwaysOnTop = true
+    bgui.Size = UDim2.new(0, 140, 0, 24)
+    bgui.StudsOffset = Vector3.new(0, 2.2, 0)
+    bgui.Adornee = part
+
+    local label = Instance.new("TextLabel")
+    label.Name = "NameLabel"
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 0.25
+    label.BackgroundColor3 = Color3.fromRGB(10,10,12)
+    label.BorderSizePixel = 0
+    label.Text = name
+    label.TextColor3 = color or Color3.new(1,1,1)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 14
+    label.TextStrokeTransparency = 0.6
+    label.Parent = bgui
+
+    return bgui
 end
 
 -- ================================================================
@@ -128,17 +155,17 @@ local function scan()
                          or (nname == "Void Nexus" and filterVoid)
             if enabled then
                 local part = resolvePart(obj)
-                if part then
-                    found[#found+1] = {part=part, name=nname}
+                if part and part.Parent then
+                    local ok, d = pcall(function() return (part.Position - pos).Magnitude end)
+                    if ok and d and d <= CONFIG.scanRadius then
+                        found[#found+1] = {part = part, name = nname, d = d}
+                    end
                 end
             end
         end
     end
 
     -- sort berdasarkan jarak
-    for i = 1, #found do
-        found[i].d = (found[i].part.Position - pos).Magnitude
-    end
     table.sort(found, function(a,b) return a.d < b.d end)
 
     local keep = {}
@@ -147,21 +174,51 @@ local function scan()
         local entry = found[i]
         local part = entry.part
         keep[part] = true
-        local m = markers[part]
-        if not m or not m.Parent then
-            m = Instance.new("Highlight")
+        local data = markers[part]
+        if not data then
+            data = {}
+            -- highlight
+            local m = Instance.new("Highlight")
             m.Name = "EngineHL"
             m.FillTransparency = 0.55
             m.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            markers[part] = m
+            m.Parent = part
+            markers[part] = data
+            data.hl = m
+            -- name tag UI (billboard)
+            local col = (entry.name == "Solar Nexus") and SOLAR_COLOR or VOID_COLOR
+            local tag = makeNameTag(part, entry.name, col)
+            tag.Parent = part
+            data.tag = tag
+        else
+            -- update existing: ensure parented and adornee correct
+            if data.hl and not data.hl.Parent then data.hl.Parent = part end
+            if data.tag and not data.tag.Parent then data.tag.Parent = part end
+            data.tag.Adornee = part
         end
-        local col = (entry.name == "Solar Nexus") and SOLAR_COLOR or VOID_COLOR
-        m.FillColor = col; m.OutlineColor = col
-        m.Adornee = part; m.Parent = part
+        -- color/outline sync
+        if data.hl then
+            local col = (entry.name == "Solar Nexus") and SOLAR_COLOR or VOID_COLOR
+            data.hl.FillColor = col; data.hl.OutlineColor = col
+            data.hl.Adornee = part
+        end
+        if data.tag then
+            -- update text with distance realtime
+            local label = data.tag:FindFirstChild("NameLabel")
+            if label then
+                label.Text = entry.name .. "  (" .. math.floor(entry.d) .. "m)"
+                label.TextColor3 = (entry.name == "Solar Nexus") and SOLAR_COLOR or VOID_COLOR
+            end
+        end
     end
-    for part in pairs(markers) do
+
+    -- remove markers that are no longer kept or whose part removed
+    for part, data in pairs(markers) do
         if not (keep[part] and part.Parent) then
-            pcall(function() markers[part]:Destroy() end)
+            pcall(function()
+                if data.hl then data.hl:Destroy() end
+                if data.tag then data.tag:Destroy() end
+            end)
             markers[part] = nil
         end
     end
@@ -216,9 +273,9 @@ minBtn.BackgroundColor3 = Color3.fromRGB(70,80,110)
 minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 11; minBtn.BorderSizePixel = 0
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0,6)
 
-------------------------------------------------------------
+-- ------------------------------------------------------------
 -- KIRI: ikon toggle (persis V14)
-------------------------------------------------------------
+-- ------------------------------------------------------------
 local leftCol = Instance.new("Frame", outer)
 leftCol.Size = UDim2.new(0,48,1,-38); leftCol.Position = UDim2.new(0,6,0,34)
 leftCol.BackgroundTransparency = 1
@@ -255,9 +312,9 @@ end
 local speedBtn, setSpeedVis = makeIconButton(0, "⚡", C.accent, CYAN)
 local radarBtn, setRadarVis = makeIconButton(46, "◎", C.orange, PINK)
 
-------------------------------------------------------------
+-- ------------------------------------------------------------
 -- KANAN: FILTER NEXUS (ganti semua filter lama)
-------------------------------------------------------------
+-- ------------------------------------------------------------
 local divider = Instance.new("Frame", outer)
 divider.Size = UDim2.new(0,1,1,-46); divider.Position = UDim2.new(0,60,0,40)
 divider.BackgroundColor3 = Color3.fromRGB(35,35,42); divider.BorderSizePixel = 0
@@ -302,9 +359,9 @@ miniBubble.BackgroundColor3 = C.accent; miniBubble.Font = Enum.Font.GothamBold
 miniBubble.TextSize = 16; miniBubble.BorderSizePixel = 0; miniBubble.Visible = false
 Instance.new("UICorner", miniBubble).CornerRadius = UDim.new(1,0)
 
-------------------------------------------------------------
+-- ------------------------------------------------------------
 -- HANDLERS
-------------------------------------------------------------
+-- ------------------------------------------------------------
 local function updateFilterStatus()
     local parts = {}
     if filterSolar then table.insert(parts, "Solar ✓") end
