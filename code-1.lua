@@ -16,12 +16,11 @@ if providedKey ~= EXPECTED_KEY then
 end
 
 -- =================================================================
--- ENGINE V14 - COMPACT FIXED EDITION
---   ✅ UI KECIL lagi (seperti V12)
---   ❌ Auto-detect DIHAPUS
---   ✅ Category BARU: Empiris, Pulsar, Quasar (di atas Mythic)
---      + Size fix: Small / Medium / Large / Huge
---   ✅ LUCKY EXACT MATCH: "2.0" = hanya tepat 2.0 yang lolos
+-- ENGINE V14 - COMPACT FIXED EDITION (Single-file)
+--   - UI kecil seperti V12 (dipertahankan)
+--   - Lucky dihapus
+--   - Hanya deteksi world-spawned "Solar Nexus" dan "Void Nexus"
+--   - Key: Jack
 -- =================================================================
 
 local Players      = game:GetService("Players")
@@ -38,20 +37,9 @@ local CONFIG = {
     scanRadius    = 100,
 }
 
-local LUCK = {
-    RarityMult = {1, 1.6, 2.6, 4.2, 7, 12, 216, 480, 600},
-    Base       = 0.00045,
-    WeightExp  = 0.5,
-    KgCap      = 500,
-    BombMult   = 3,
-    BloodMult  = 4,
-}
-
 local RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary" }
--- Category baru diposisikan DI ATAS Mythic:
 local CATEGORIES = { "Empiris", "Pulsar", "Quasar" }
 local MYTHIC = "Mythic"
-
 local SIZES = { "Small", "Medium", "Large", "Huge" }
 
 local RARITY_COLORS = {
@@ -71,9 +59,6 @@ local C = {
 }
 
 local speedOn, radarOn = false, false
-local filterRarityMin = 0
-local wantMythic      = false
-local filterMinLucky  = nil          -- nil = semua; angka = EXACT match
 local selectedCategories = {}
 local selectedSizes      = {}
 local markers = {}
@@ -113,114 +98,7 @@ task.spawn(function()
 end)
 
 -- ================================================================
--- BACA INFO CRYSTAL (tanpa auto-detect — fixed keys)
--- ================================================================
-local function getCrystalCategory(part)
-    for _, k in ipairs({"CrystalName","CrystalType","Type","Kind"}) do
-        local v = part:GetAttribute(k)
-        if type(v) == "string" and v ~= "" then return v end
-    end
-    local tn = tostring(part:GetAttribute("TierName") or "")
-    for _, cat in ipairs(CATEGORIES) do
-        if tn:lower():find(cat:lower(), 1, true) then return cat end
-    end
-    return nil
-end
-
-local function getCrystalSize(part)
-    for _, k in ipairs({"Size","CrystalSize","SizeCategory"}) do
-        local v = part:GetAttribute(k)
-        if type(v) == "string" and v ~= "" then return v end
-    end
-    local tn = tostring(part:GetAttribute("TierName") or "")
-    for _, sz in ipairs(SIZES) do
-        if tn:find(sz, 1, true) then return sz end
-    end
-    return nil
-end
-
--- ================================================================
--- LUCKY — EXACT MATCH
---   filterMinLucky = 2.0 → hanya luck TEPAT 2.0 yang lolos
---   (toleransi 0.001 untuk pembulatan float)
--- ================================================================
-local function getLuckScore(part)
-    for _, key in ipairs({"CrystalLuck","LuckValue","Luck","Lucky"}) do
-        local v = part:GetAttribute(key)
-        if type(v) == "number" and v > 0 then return v end
-    end
-
-    local tier = tonumber(part:GetAttribute("Tier")) or 1
-    local kg = tonumber(part:GetAttribute("LuckKg"))
-             or tonumber(part:GetAttribute("WeightKg")) or 0
-    kg = math.max(0, kg)
-
-    local rm = LUCK.RarityMult[tier] or LUCK.RarityMult[1]
-    local raw = rm * math.min(kg, LUCK.KgCap) ^ LUCK.WeightExp * LUCK.Base
-
-    local mult = tonumber(part:GetAttribute("MutationLuckRoll")) or 1
-    if part:GetAttribute("BombCrystal") == true then mult = mult * LUCK.BombMult end
-    if part:GetAttribute("IsBloodCrystal") == true then mult = mult * LUCK.BloodMult end
-
-    return math.max(raw, raw * mult, rm * mult)
-end
-
-local function passesLucky(part)
-    if not filterMinLucky then return true end
-    local score = getLuckScore(part)
-    return math.abs(score - filterMinLucky) <= 0.001   -- EXACT saja
-end
-
--- ================================================================
--- FILTER GABUNGAN
--- ================================================================
-local function getRarityIndex(part)
-    local tn = tostring(part:GetAttribute("TierName") or "")
-    for i, r in ipairs(RARITIES) do
-        if tn:lower():find(r:lower(), 1, true) then return i end
-    end
-    if tn:lower():find(MYTHIC:lower(), 1, true) then return 99 end
-    return -1
-end
-
-local function passesFilter(part)
-    -- Rarity biasa
-    if filterRarityMin > 0 then
-        local ri = getRarityIndex(part)
-        local isMythic = (ri == 99)
-        if isMythic then
-            if not wantMythic then return false end
-        elseif ri < filterRarityMin then
-            return false
-        end
-    end
-    -- Category (Empiris/Pulsar/Quasar)
-    if next(selectedCategories) then
-        local cat = getCrystalCategory(part)
-        if not cat or not selectedCategories[cat] then return false end
-    end
-    -- Size
-    if next(selectedSizes) then
-        local sz = getCrystalSize(part)
-        if not sz or not selectedSizes[sz] then return false end
-    end
-    return passesLucky(part)
-end
-
-local function markerColor(part)
-    local r = tonumber(part:GetAttribute("TierColorR"))
-    local g = tonumber(part:GetAttribute("TierColorG"))
-    local b = tonumber(part:GetAttribute("TierColorB"))
-    if r and g and b then return Color3.fromRGB(r,g,b) end
-    local tn = tostring(part:GetAttribute("TierName") or "")
-    for name, col in pairs(RARITY_COLORS) do
-        if tn:lower():find(name:lower(), 1, true) then return col end
-    end
-    return Color3.fromRGB(200,210,230)
-end
-
--- ================================================================
--- RADAR SCAN
+-- RADAR: only world-spawned Solar Nexus and Void Nexus
 -- ================================================================
 local function clearAllMarkers()
     for part, m in pairs(markers) do
@@ -229,18 +107,20 @@ local function clearAllMarkers()
     end
 end
 
-local function findCrystalFolder()
-    local things = workspace:FindFirstChild("Things")
-    local c = things and things:FindFirstChild("Crystals")
-    if c then return c end
-    return workspace:FindFirstChild("Crystals", true)
+local function markerColor(part)
+    local name = tostring(part.Name or "")
+    if name:lower():find("solar", 1, true) then
+        return Color3.fromRGB(255,220,80)
+    elseif name:lower():find("void", 1, true) then
+        return Color3.fromRGB(160,80,255)
+    end
+    return Color3.fromRGB(200,210,230)
 end
 
--- Cari crystal yang MUNCUL di world (bukan local/backpack):
-local function getWorldCrystalParts()
+local function getWorldNexusParts()
     local partsList = {}
-    local candNames = {"Solar Nexus", "Void Nexus"}
-    for _, name in ipairs(candNames) do
+    local candidateNames = {"Solar Nexus", "Void Nexus"}
+    for _, name in ipairs(candidateNames) do
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj.Name == name then
                 if obj:IsA("BasePart") then
@@ -253,7 +133,6 @@ local function getWorldCrystalParts()
                         prim = obj:FindFirstChildWhichIsA("BasePart")
                     end
                     if prim then
-                        if prim:GetAttribute("TierName") == nil then pcall(function() prim:SetAttribute("TierName", name) end) end
                         partsList[#partsList+1] = prim
                     end
                 end
@@ -263,33 +142,25 @@ local function getWorldCrystalParts()
     return partsList
 end
 
+-- passesFilter: Nexus-only, ignore toggles
+local function passesFilter(part)
+    return true
+end
+
 local function scan()
     local char = localPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local partsFromWorld = getWorldCrystalParts()
-    local folder = findCrystalFolder()
-    if #partsFromWorld == 0 and not folder then clearAllMarkers() return end
+    local parts = getWorldNexusParts()
+    if #parts == 0 then clearAllMarkers() return end
 
     local pos = hrp and hrp.Position or Vector3.zero
     local found = {}
 
-    if #partsFromWorld > 0 then
-        for _, part in ipairs(partsFromWorld) do
-            if part and part:IsA("BasePart") and passesFilter(part) then
-                local d = hrp and (part.Position - pos).Magnitude or 0
-                if d <= CONFIG.scanRadius then
-                    found[#found+1] = {part=part, d=d}
-                end
-            end
-        end
-    else
-        for _, part in ipairs(folder:GetDescendants()) do
-            if part:IsA("BasePart") and part:GetAttribute("TierName") ~= nil
-            and passesFilter(part) then
-                local d = hrp and (part.Position - pos).Magnitude or 0
-                if d <= CONFIG.scanRadius then
-                    found[#found+1] = {part=part, d=d}
-                end
+    for _, part in ipairs(parts) do
+        if part and part:IsA("BasePart") and passesFilter(part) then
+            local d = hrp and (part.Position - pos).Magnitude or 0
+            if d <= CONFIG.scanRadius then
+                found[#found+1] = {part=part, d=d}
             end
         end
     end
@@ -321,6 +192,7 @@ local function scan()
     end
 end
 
+-- background loop
 task.spawn(function()
     while true do
         if radarOn then pcall(scan) end
@@ -329,7 +201,7 @@ task.spawn(function()
 end)
 
 -- ================================================================
--- GUI KECIL (seperti V12)
+-- GUI KECIL (like V12) - Lucky removed, UI otherwise same
 -- ================================================================
 local playerGui = localPlayer:WaitForChild("PlayerGui")
 local old = playerGui:FindFirstChild("EngineGUI")
@@ -370,9 +242,7 @@ minBtn.BackgroundColor3 = Color3.fromRGB(70,80,110)
 minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 11; minBtn.BorderSizePixel = 0
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0,6)
 
-------------------------------------------------------------
--- KIRI: ikon toggle
-------------------------------------------------------------
+-- LEFT: icon toggles
 local leftCol = Instance.new("Frame", outer)
 leftCol.Size = UDim2.new(0,48,1,-38); leftCol.Position = UDim2.new(0,6,0,34)
 leftCol.BackgroundTransparency = 1
@@ -409,9 +279,7 @@ end
 local speedBtn, setSpeedVis = makeIconButton(0, "⚡", C.accent, CYAN)
 local radarBtn, setRadarVis = makeIconButton(46, "◎", C.orange, PINK)
 
-------------------------------------------------------------
--- KANAN: FILTER (kompak, 2 baris scrollable)
-------------------------------------------------------------
+-- RIGHT: filter area (layout kept but does not affect Nexus detection)
 local divider = Instance.new("Frame", outer)
 divider.Size = UDim2.new(0,1,1,-46); divider.Position = UDim2.new(0,60,0,40)
 divider.BackgroundColor3 = Color3.fromRGB(35,35,42); divider.BorderSizePixel = 0
@@ -426,7 +294,7 @@ fTitle.TextColor3 = C.purple; fTitle.TextSize = 9
 fTitle.Font = Enum.Font.GothamBold; fTitle.TextXAlignment = Enum.TextXAlignment.Left
 fTitle.BackgroundTransparency = 1
 
--- BARIS 1: Rarity + Mythic + 3 category baru (Empiris/Pulsar/Quasar)
+-- BARIS 1: Rarity + Mythic + 3 category baru (visual only)
 local catScroll = Instance.new("ScrollingFrame", rightCol)
 catScroll.Size = UDim2.new(1,0,0,30); catScroll.Position = UDim2.new(0,0,0,15)
 catScroll.BackgroundTransparency = 1; catScroll.BorderSizePixel = 0
@@ -437,7 +305,7 @@ catScroll.ScrollBarThickness = 2
 local catGrid = Instance.new("UIGridLayout", catScroll)
 catGrid.CellSize = UDim2.new(0,54,0,13); catGrid.CellPadding = UDim2.new(0,3,0,3)
 
-local toggleButtons = {} -- [nama] = {btn, get, set}
+local toggleButtons = {} -- [nama] = {btn, get}
 
 local function makeToggleButton(name, color, getState, setState)
     local b = Instance.new("TextButton", catScroll)
@@ -454,29 +322,17 @@ local function makeToggleButton(name, color, getState, setState)
     end)
 end
 
--- Rarity biasa
-local rarityState = function(i) return function() return filterRarityMin == i end end
-local raritySet = function(i) return function()
-    filterRarityMin = (filterRarityMin == i) and 0 or i
-end end
+local rarityState = function(i) return function() return false end end
+local raritySet = function(i) return function() end end
 for i, r in ipairs(RARITIES) do
     makeToggleButton(r, RARITY_COLORS[r], rarityState(i), raritySet(i))
 end
--- Mythic (toggle terpisah)
-makeToggleButton(MYTHIC, RARITY_COLORS[MYTHIC],
-    function() return wantMythic end,
-    function() wantMythic = not wantMythic end)
--- 3 CATEGORY BARU — di atas Mythic secara logika filter
+makeToggleButton(MYTHIC, RARITY_COLORS[MYTHIC], function() return false end, function() end)
 for _, cat in ipairs(CATEGORIES) do
-    makeToggleButton(cat, RARITY_COLORS[cat],
-        function() return selectedCategories[cat] == true end,
-        function()
-            if selectedCategories[cat] then selectedCategories[cat] = nil
-            else selectedCategories[cat] = true end
-        end)
+    makeToggleButton(cat, RARITY_COLORS[cat], function() return false end, function() end)
 end
 
--- BARIS 2: Size
+-- BARIS 2: Size (visual only)
 local sizeScroll = Instance.new("ScrollingFrame", rightCol)
 sizeScroll.Size = UDim2.new(1,0,0,16); sizeScroll.Position = UDim2.new(0,0,0,49)
 sizeScroll.BackgroundTransparency = 1; sizeScroll.BorderSizePixel = 0
@@ -501,39 +357,9 @@ for _, sz in ipairs(SIZES) do
     end)
 end
 
--- Lucky EXACT
-local luckyRow = Instance.new("Frame", rightCol)
-luckyRow.Size = UDim2.new(1,0,0,22); luckyRow.Position = UDim2.new(0,0,0,72)
-luckyRow.BackgroundTransparency = 1
-
-local luckyBox = Instance.new("TextBox", luckyRow)
-luckyBox.Size = UDim2.new(0,110,1,0)
-luckyBox.PlaceholderText = "Lucky: 2.0 exact"
-luckyBox.Text = ""; luckyBox.TextColor3 = C.textMain; luckyBox.TextSize = 11
-luckyBox.Font = Enum.Font.GothamBold; luckyBox.BackgroundColor3 = C.black
-luckyBox.ClearTextOnFocus = false; luckyBox.BorderSizePixel = 0
-Instance.new("UICorner", luckyBox).CornerRadius = UDim.new(0,7)
-local lbPad = Instance.new("UIPadding", luckyBox)
-lbPad.PaddingLeft = UDim.new(0,7)
-
-local clearLuckyBtn = Instance.new("TextButton", luckyRow)
-clearLuckyBtn.Size = UDim2.new(0,44,1,0); clearLuckyBtn.Position = UDim2.new(0,114,0,0)
-clearLuckyBtn.Text = "✕"; clearLuckyBtn.TextColor3 = Color3.new(1,1,1)
-clearLuckyBtn.BackgroundColor3 = Color3.fromRGB(50,50,58)
-clearLuckyBtn.Font = Enum.Font.GothamBold; clearLuckyBtn.TextSize = 11
-clearLuckyBtn.BorderSizePixel = 0
-Instance.new("UICorner", clearLuckyBtn).CornerRadius = UDim.new(0,7)
-
-local resetBtn = Instance.new("TextButton", luckyRow)
-resetBtn.Size = UDim2.new(1,-162,1,0); resetBtn.Position = UDim2.new(0,162,0,0)
-resetBtn.Text = "↺ RESET"; resetBtn.TextColor3 = Color3.new(1,1,1)
-resetBtn.BackgroundColor3 = C.red; resetBtn.Font = Enum.Font.GothamBold
-resetBtn.TextSize = 9; resetBtn.BorderSizePixel = 0
-Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0,7)
-
 local filterStatus = Instance.new("TextLabel", rightCol)
 filterStatus.Size = UDim2.new(1,0,0,30); filterStatus.Position = UDim2.new(0,0,0,100)
-filterStatus.Text = ""; filterStatus.TextColor3 = C.green
+filterStatus.Text = "Filter: Nexus only"; filterStatus.TextColor3 = C.green
 filterStatus.TextSize = 9; filterStatus.Font = Enum.Font.GothamBold
 filterStatus.TextXAlignment = Enum.TextXAlignment.Left
 filterStatus.TextYAlignment = Enum.TextYAlignment.Top
@@ -546,69 +372,18 @@ miniBubble.BackgroundColor3 = C.accent; miniBubble.Font = Enum.Font.GothamBold
 miniBubble.TextSize = 16; miniBubble.BorderSizePixel = 0; miniBubble.Visible = false
 Instance.new("UICorner", miniBubble).CornerRadius = UDim.new(1,0)
 
-------------------------------------------------------------
 -- HANDLERS
-------------------------------------------------------------
 local function updateFilterStatus()
-    local parts = {}
-    if filterRarityMin > 0 then table.insert(parts, RARITIES[filterRarityMin].."+") end
-    if wantMythic then table.insert(parts, "Mythic") end
-    local nc, ns = 0, 0
-    for _ in pairs(selectedCategories) do nc += 1 end
-    for _ in pairs(selectedSizes) do ns += 1 end
-    if nc > 0 then table.insert(parts, nc.." cat") end
-    if ns > 0 then table.insert(parts, ns.." size") end
-    if filterMinLucky then
-        local v = filterMinLucky
-        local txt = (v == math.floor(v)) and ("%g"):format(v) or ("%.1f"):format(v)
-        table.insert(parts, "Luck="..txt.." exact")
-    end
-    filterStatus.Text = (#parts > 0) and table.concat(parts, " | ") or "Filter: SEMUA"
+    filterStatus.Text = "Filter: Nexus only"
 end
 
 local function refreshToggles()
     for name, data in pairs(toggleButtons) do
-        if data.get() then
-            -- cari warna asli
-            local col = C.accent
-            for _, r in ipairs(RARITIES) do if name == r then col = RARITY_COLORS[r] end end
-            if name == MYTHIC then col = RARITY_COLORS[MYTHIC] end
-            for _, cat in ipairs(CATEGORIES) do if name == cat then col = RARITY_COLORS[cat] end end
-            data.btn.BackgroundColor3 = col
-        else
-            data.btn.BackgroundColor3 = C.black
-        end
+        data.btn.BackgroundColor3 = C.black
     end
 end
 
-luckyBox.FocusLost:Connect(function()
-    local txt = luckyBox.Text:gsub("[%s,]", "")
-    if txt == "" then
-        filterMinLucky = nil
-    else
-        local v = tonumber(txt)
-        filterMinLucky = v   -- bisa apa saja, termasuk 2.0 / 50.0
-    end
-    updateFilterStatus()
-    if radarOn then pcall(scan) end
-end)
-
-clearLuckyBtn.MouseButton1Click:Connect(function()
-    filterMinLucky = nil
-    luckyBox.Text = ""
-    updateFilterStatus()
-    if radarOn then pcall(scan) end
-end)
-
-resetBtn.MouseButton1Click:Connect(function()
-    filterRarityMin, wantMythic = 0, false
-    filterMinLucky = nil
-    selectedCategories = {}
-    selectedSizes = {}
-    luckyBox.Text = ""
-    refreshToggles(); updateFilterStatus()
-    if radarOn then pcall(scan) end
-end)
+updateFilterStatus()
 
 speedBtn.MouseButton1Click:Connect(function()
     speedOn = not speedOn
@@ -634,8 +409,6 @@ end)
 miniBubble.MouseButton1Click:Connect(function()
     outer.Visible = true; miniBubble.Visible = false
 end)
-
-updateFilterStatus()
 
 -- ===== DRAG =====
 local function makeDraggable(frame)
@@ -668,4 +441,4 @@ end
 makeDraggable(outer)
 makeDraggable(miniBubble)
 
-print("ENGINE V14 - LOADED ✔ (UI kecil | No auto-detect | Empiris/Pulsar/Quasar | Lucky EXACT)")
+print("ENGINE V14 - LOADED ✔ (UI kecil | Nexus-only | Key=Jack)")
