@@ -1,5 +1,5 @@
 -- Key check: pasang di paling atas, sisanya file tidak berubah
-local EXPECTED_KEY = "dhubgokil"
+local EXPECTED_KEY = "Jack"
 
 local providedKey
 if type(getgenv) == "function" then
@@ -236,21 +236,72 @@ local function findCrystalFolder()
     return workspace:FindFirstChild("Crystals", true)
 end
 
+-- Prioritize the two special crystals in the player's Backpack: "Solar Nexus" and "Void Nexus".
+local function getBackpackCrystalParts()
+    local partsList = {}
+    local bp = localPlayer:FindFirstChild("Backpack")
+    local candNames = {"Solar Nexus", "Void Nexus"}
+    for _, name in ipairs(candNames) do
+        local obj = (bp and bp:FindFirstChild(name)) or (localPlayer.Character and localPlayer.Character:FindFirstChild(name))
+        if obj then
+            if obj:IsA("BasePart") then
+                partsList[#partsList+1] = obj
+            elseif obj:IsA("Tool") then
+                local handle = obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart")
+                if handle then
+                    -- ensure a TierName exists so existing filters/coloring can still work
+                    if handle:GetAttribute("TierName") == nil then
+                        pcall(function() handle:SetAttribute("TierName", name) end)
+                    end
+                    partsList[#partsList+1] = handle
+                end
+            else
+                local prim = obj.PrimaryPart
+                if prim and prim:IsA("BasePart") then
+                    if prim:GetAttribute("TierName") == nil then pcall(function() prim:SetAttribute("TierName", name) end) end
+                    partsList[#partsList+1] = prim
+                else
+                    for _,desc in ipairs(obj:GetDescendants()) do
+                        if desc:IsA("BasePart") then
+                            if desc:GetAttribute("TierName") == nil then pcall(function() desc:SetAttribute("TierName", name) end) end
+                            partsList[#partsList+1]=desc
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return partsList
+end
+
 local function scan()
     local char = localPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local partsFromBP = getBackpackCrystalParts()
     local folder = findCrystalFolder()
-    if not folder then clearAllMarkers() return end
+    if #partsFromBP == 0 and not folder then clearAllMarkers() return end
 
     local pos = hrp and hrp.Position or Vector3.zero
     local found = {}
 
-    for _, part in ipairs(folder:GetDescendants()) do
-        if part:IsA("BasePart") and part:GetAttribute("TierName") ~= nil
-        and passesFilter(part) then
-            local d = hrp and (part.Position - pos).Magnitude or 0
-            if d <= CONFIG.scanRadius then
-                found[#found+1] = {part=part, d=d}
+    if #partsFromBP > 0 then
+        for _, part in ipairs(partsFromBP) do
+            if part and part:IsA("BasePart") and passesFilter(part) then
+                local d = hrp and (part.Position - pos).Magnitude or 0
+                if d <= CONFIG.scanRadius then
+                    found[#found+1] = {part=part, d=d}
+                end
+            end
+        end
+    else
+        for _, part in ipairs(folder:GetDescendants()) do
+            if part:IsA("BasePart") and part:GetAttribute("TierName") ~= nil
+            and passesFilter(part) then
+                local d = hrp and (part.Position - pos).Magnitude or 0
+                if d <= CONFIG.scanRadius then
+                    found[#found+1] = {part=part, d=d}
+                end
             end
         end
     end
