@@ -8,710 +8,216 @@ if providedKey == nil and type(_G) == "table" then providedKey = _G.key end
 if providedKey ~= EXPECTED_KEY then return end
 
 
+
 -- =================================================================
--- ENGINE V16 - COMPACT WORLD RADAR + SETTINGS EDITION
---
--- V12.0 MODERN (upgrade dari V11 — no lag on radar ON):
--- ✅ MARKER ONLY: Highlight warna-warni (tanpa nama/kg/price)
--- ✅ Multi-select rarity + nexus + category
--- ✅ Rarity OFF → marker ilang; rarity ON → marker muncul lagi
--- ✅ HARD radius 200m • sticky drop ~210m
--- ✅ maxMarkers 40
--- ✅ V12: radar ON TIDAK rebuild cache penuh (0 lag spike)
--- ✅ V12: initial cache ASYNC chunked (tidak freeze frame)
--- ✅ V12: soft-start scan (marker bertahap, tidak semua sekaligus)
--- ✅ V12: filter-first + distance² + cache color permanen
--- ✅ HAPUS size/kg/price filter + BillboardGui
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN
+-- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
 -- =================================================================
 
-local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local UserGameSettings = UserSettings():GetService("UserGameSettings")
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
 
--- ================================================================
--- CONFIG
--- ================================================================
+pcall(function()
+    if setfpscap then setfpscap(999) elseif set_fps_cap then set_fps_cap(999) end
+end)
 
 local CONFIG = {
-    normalSpeed   = 16,
-    boostMult     = 3,
-
-    -- interval stabil untuk 40 marker only (tanpa label = lebih ringan)
-    radarInterval = 0.25,
-
-    -- maksimum marker warna-warni (35+ aman)
-    maxMarkers    = 40,
-
-    -- HARD RADAR RANGE 200m — marker baru ilang kalau lewat radius ini
-    scanRadius    = 200,
-
-    -- precompute radius²
-    scanRadiusSq  = 200 * 200,
-
-    -- hysteresis: marker yang sudah aktif baru dihapus di radius ini
-    -- (sedikit lebih longgar dari scanRadius supaya tidak flicker di boundary)
-    dropRadius    = 210,
-    dropRadiusSq  = 210 * 210,
-
-    -- fallback scan interval
-    fallbackScanInterval = 22,
-
-    -- chunk size: yield hanya jika list sangat panjang
-    scanChunkSize = 64,
-
-    -- object target
-    nexusNames = {
-        ["Void Nexus"] = true,
-        ["Solar Nexus"] = true,
-        ["Aether Nexus"] = true,
-    },
-
+    normalSpeed = 16,
+    boostMult = 2,
+    radarIntervalIdle = 0.12,
+    radarIntervalMove = 0.05,
+    moveThresholdSq = 2.5 * 2.5,
+    maxMarkers = 36,
+    scanRadius = 210,
+    scanRadiusSq = 210 * 210,
+    dropRadius = 225,
+    dropRadiusSq = 225 * 225,
+    cleanupInterval = 4.5,
 }
 
--- ================================================================
--- FILTER DATA
--- ================================================================
-
--- Rarity filter mengikuti UI referensi: setiap rarity dipilih satu per satu.
--- Label UI dapat berbahasa Indonesia, sedangkan atribut game dapat berbahasa Inggris.
-local RARITIES = {
-    "Exotic",
-    "Legendary",
-    "Rare",
-    "Uncommon",
-    "Common",
-    "Epic",
-    "Mythic",
-}
-
--- Semua label filter memakai satu kamus bahasa Indonesia.
--- Radar tetap menerima alias Inggris dari atribut game.
+local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
 local RARITY_UI_LABELS = {
-    Exotic = "Eksotis",
-    Legendary = "Legendaris",
-    Rare = "Langka",
-    Uncommon = "Tidak Biasa",
-    Common = "Biasa",
-    Epic = "Epik",
-    Mythic = "Mistik",
+    Exotic = "Eksotis", Legendary = "Legendaris", Rare = "Langka",
+    Uncommon = "Tidak Biasa", Common = "Biasa", Epic = "Epik", Mythic = "Mistik",
 }
-
 local RARITY_ALIASES = {
-    exotic = "Exotic",
-    eksotis = "Exotic",
-    legendary = "Legendary",
-    legendaris = "Legendary",
-    rare = "Rare",
-    langka = "Rare",
-    uncommon = "Uncommon",
-    ["tidak biasa"] = "Uncommon",
-    common = "Common",
-    biasa = "Common",
-    epic = "Epic",
-    epik = "Epic",
-    mythic = "Mythic",
-    mistik = "Mythic",
+    exotic = "Exotic", eksotis = "Exotic", legendary = "Legendary", legendaris = "Legendary",
+    rare = "Rare", langka = "Rare", uncommon = "Uncommon", ["tidak biasa"] = "Uncommon",
+    common = "Common", biasa = "Common", epic = "Epic", epik = "Epic",
+    mythic = "Mythic", mistik = "Mythic",
 }
-
-local CATEGORIES = {
-    "Empiris",
-    "Pulsar",
-    "Quasar",
-}
-
-local NEXUS = {
-    "Void Nexus",
-    "Solar Nexus",
-    "Aether Nexus",
-}
-
-local MYTHIC = "Mythic"
-
-local SIZES = {
-    "Tiny",
-    "Small",
-    "Medium",
-    "Large",
-    "Huge",
-}
-
--- ================================================================
--- COLORS
--- ================================================================
+local CATEGORIES = {"Empiris", "Pulsar", "Quasar"}
+local NEXUS = {"Void Nexus", "Solar Nexus", "Aether Nexus"}
 
 local RARITY_COLORS = {
-    Exotic = Color3.fromRGB(255,220,0),
-    Common = Color3.fromRGB(180,180,180),
-    Uncommon = Color3.fromRGB(90,200,90),
-    Rare = Color3.fromRGB(70,140,255),
-    Epic = Color3.fromRGB(170,80,255),
-    Legendary = Color3.fromRGB(255,170,40),
-    Mythic = Color3.fromRGB(255,60,130),
-    Empiris = Color3.fromRGB(0,255,200),
-    Pulsar = Color3.fromRGB(255,220,0),
-    Quasar = Color3.fromRGB(255,80,80),
-    ["Void Nexus"] = Color3.fromRGB(170,80,255),
-    ["Solar Nexus"] = Color3.fromRGB(255,170,40),
-    ["Aether Nexus"] = Color3.fromRGB(0,220,255),
+    Exotic = Color3.fromRGB(255, 220, 0), Common = Color3.fromRGB(180, 180, 180),
+    Uncommon = Color3.fromRGB(90, 200, 90), Rare = Color3.fromRGB(70, 140, 255),
+    Epic = Color3.fromRGB(170, 80, 255), Legendary = Color3.fromRGB(255, 170, 40),
+    Mythic = Color3.fromRGB(255, 60, 130), Empiris = Color3.fromRGB(0, 255, 200),
+    Pulsar = Color3.fromRGB(255, 220, 0), Quasar = Color3.fromRGB(255, 80, 80),
+    ["Void Nexus"] = Color3.fromRGB(170, 80, 255), ["Solar Nexus"] = Color3.fromRGB(255, 170, 40),
+    ["Aether Nexus"] = Color3.fromRGB(0, 220, 255),
 }
-
+local CRYSTAL_COLORS = {
+    obsidian = Color3.fromRGB(155, 100, 220), ember = Color3.fromRGB(255, 85, 35),
+    crystal = Color3.fromRGB(80, 210, 255),
+}
 local C = {
-    bg = Color3.fromRGB(8,8,10),
-    black = Color3.fromRGB(14,14,16),
-    accent = Color3.fromRGB(88,101,242),
-    green = Color3.fromRGB(87,242,135),
-    orange = Color3.fromRGB(254,160,60),
-    purple = Color3.fromRGB(180,80,220),
-    red = Color3.fromRGB(237,66,69),
-    teal = Color3.fromRGB(40,190,180),
-    textMain = Color3.fromRGB(235,238,245),
-    textSub = Color3.fromRGB(130,136,148),
+    bg = Color3.fromRGB(8, 8, 10), black = Color3.fromRGB(14, 14, 16),
+    accent = Color3.fromRGB(88, 101, 242), green = Color3.fromRGB(87, 242, 135),
+    orange = Color3.fromRGB(254, 160, 60), purple = Color3.fromRGB(180, 80, 220),
+    red = Color3.fromRGB(237, 66, 69), textMain = Color3.fromRGB(235, 238, 245),
+    textSub = Color3.fromRGB(130, 136, 148),
 }
 
--- ================================================================
--- STATE
--- ================================================================
+local speedOn, radarOn, boosterOn = false, false, false
+local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
+local targetRegistry, targetList = {}, {}
+local activeMarkers = {}
+local highlightPool = table.create(CONFIG.maxMarkers + 10)
 
-local speedOn = false
-local radarOn = false
-
--- UI Page State
-local currentPage = "radar"  -- "radar" or "settings"
-
-local selectedRarities = {}
-
-local selectedCategories = {}
-local selectedNexus = {}
-
-local markers = {}
-
--- Object cache
-local worldTargets = {}
-local targetTimestamps = {}
-local targetInfo = {}
-
--- V5.0: list target yang sudah lolos rarity (rebuild hanya saat filter berubah)
--- Scan loop HANYA iterasi list ini → tidak scan item di luar filter.
-local filteredTargets = {}
-local filteredDirty = true
-
--- Connections
-local worldConnections = {}
-
--- Debounce
-local pendingAdds = {}
-local addProcessTimer = nil
-local lastFallbackScan = 0
-local fallbackScanBusy = false
-local scanRunning = false
-
--- ================================================================
--- SPEED 3X
--- ================================================================
-
-local function targetSpeed()
-    return CONFIG.normalSpeed * CONFIG.boostMult
+for i = 1, CONFIG.maxMarkers + 10 do
+    local hl = Instance.new("Highlight")
+    hl.Name = "HyperHL"
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.FillTransparency = 0.30
+    hl.OutlineTransparency = 0
+    hl.Enabled = false
+    highlightPool[i] = hl
 end
 
-local currentConn = nil
-local lastSpeedEnforce = 0
+local MAX_FOUND_BUFFER = 64
+local foundSlots = table.create(MAX_FOUND_BUFFER)
+for i = 1, MAX_FOUND_BUFFER do
+    foundSlots[i] = {part = nil, data = nil, dist = 0}
+end
 
-local function hookHumanoid()
+local keepBuffer = {}
+local scanRunning, lastScanClock, lastHrpPos, lastCleanup = false, 0, Vector3.zero, 0
+local isMoving = false
 
-    if currentConn then
-        currentConn:Disconnect()
-        currentConn = nil
+local function acquireHighlight(part, color)
+    local hl = table.remove(highlightPool)
+    if not hl or not hl.Parent then
+        hl = Instance.new("Highlight")
+        hl.Name = "HyperHL"
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.FillTransparency = 0.30
+        hl.OutlineTransparency = 0
     end
+    hl.FillColor = color
+    hl.OutlineColor = color
+    hl.Adornee = part
+    hl.Parent = part
+    hl.Enabled = true
+    return hl
+end
 
-    local character = localPlayer.Character
-
-    if not character then
-        return
-    end
-
-    local hum = character:FindFirstChildOfClass("Humanoid")
-
-    if not hum then
-        return
-    end
-
-    currentConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-        if speedOn and hum.WalkSpeed ~= targetSpeed() then
-            hum.WalkSpeed = targetSpeed()
+local function releaseHighlight(part)
+    local pack = activeMarkers[part]
+    if pack then
+        local hl = pack.hl
+        if hl then
+            hl.Enabled = false
+            hl.Adornee = nil
+            hl.Parent = nil
+            table.insert(highlightPool, hl)
         end
-    end)
-
-    hum.WalkSpeed = targetSpeed()
+        activeMarkers[part] = nil
+    end
 end
 
-RunService.Heartbeat:Connect(function()
-    if not speedOn then
-        return
-    end
-
-    local now = tick()
-    if (now - lastSpeedEnforce) < 0.15 then
-        return
-    end
-    lastSpeedEnforce = now
-
-    local character = localPlayer.Character
-
-    if not character then
-        return
-    end
-
-    local hum = character:FindFirstChildOfClass("Humanoid")
-
-    if hum and hum.WalkSpeed ~= targetSpeed() then
-        hum.WalkSpeed = targetSpeed()
-    end
-end)
-
-localPlayer.CharacterAdded:Connect(function()
-    task.wait(0.5)
-    if speedOn then
-        hookHumanoid()
-    end
-end)
-
--- ================================================================
--- UTILITY
--- ================================================================
-
-local function isLocalCharacterObject(obj)
-    local character = localPlayer.Character
-    if not character then
-        return false
-    end
-    return obj:IsDescendantOf(character)
+local function clearAllMarkers()
+    for part in pairs(activeMarkers) do releaseHighlight(part) end
+    table.clear(activeMarkers)
 end
 
-local function isBackpackObject(obj)
-    local backpack = localPlayer:FindFirstChild("Backpack")
-    if not backpack then
-        return false
-    end
-    return obj:IsDescendantOf(backpack)
-end
-
-local function isPlayerCharacterObject(obj)
-    for _, player in ipairs(Players:GetPlayers()) do
-        local character = player.Character
-        if character and obj:IsDescendantOf(character) then
-            return true
-        end
+local function isForbiddenObject(obj)
+    if not obj then return true end
+    local char = localPlayer.Character
+    if char and obj:IsDescendantOf(char) then return true end
+    local bp = localPlayer:FindFirstChild("Backpack")
+    if bp and obj:IsDescendantOf(bp) then return true end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= localPlayer and p.Character and obj:IsDescendantOf(p.Character) then return true end
     end
     return false
 end
 
-local function isForbiddenWorldObject(obj)
-    if not obj then
-        return true
-    end
-    if isLocalCharacterObject(obj) then
-        return true
-    end
-    if isBackpackObject(obj) then
-        return true
-    end
-    if isPlayerCharacterObject(obj) then
-        return true
-    end
-    return false
+local function normalizeName(name)
+    if type(name) ~= "string" then return "" end
+    return name:lower():gsub("[%s_%-]+", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
 end
-
--- ================================================================
--- NAME RESOLUTION
--- ================================================================
 
 local function readStringAttribute(obj, key)
-    local ok, value = pcall(function()
-        return obj:GetAttribute(key)
-    end)
-
-    if not ok then
-        return nil
-    end
-
-    if type(value) == "string" and value ~= "" then
-        return value
-    end
-
+    local ok, value = pcall(function() return obj:GetAttribute(key) end)
+    if ok and type(value) == "string" and value ~= "" then return value end
     return nil
 end
 
 local function getObjectName(obj)
-    if not obj then
-        return ""
-    end
-
-    local keys = {
-        "ItemName", "CrystalName", "NexusName", 
-        "DisplayName", "ObjectName",
-    }
-
-    for _, key in ipairs(keys) do
+    if not obj then return "" end
+    for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName"}) do
         local value = readStringAttribute(obj, key)
-        if value then
-            return value
-        end
+        if value then return value end
     end
-
     return obj.Name
 end
 
-local function isMeshNoiseName(name)
-    local normalized = tostring(name or ""):lower():gsub("[%s_%-]+", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
-    return normalized == "mesh"
-        or normalized:match("^mesh[%.%s_%-]*%d*$") ~= nil
-        or normalized == "handle"
-        or normalized == "basepart"
-        or normalized == "part"
-end
-
-local function getCleanCrystalName(obj, fallbackPart)
-    local current = obj or fallbackPart
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        for _, key in ipairs({"ItemName", "CrystalName", "DisplayName", "ObjectName"}) do
-            local value = readStringAttribute(current, key)
-            if value and not isMeshNoiseName(value) then
-                return value
-            end
-        end
-        if not isMeshNoiseName(current.Name) then
-            return current.Name
-        end
-        current = current.Parent
-        depth += 1
-    end
-    return "Crystal"
-end
-
-local function readAttribute(obj, key)
-    if not obj then
-        return nil
-    end
-    local ok, value = pcall(function()
-        return obj:GetAttribute(key)
-    end)
-    return ok and value or nil
-end
-
-local function parseNumber(value)
-    if type(value) == "number" then
-        return value
-    end
-    if type(value) ~= "string" then
-        return nil
-    end
-    local cleaned = value:gsub(",", ""):gsub("%$", "")
-    return tonumber(cleaned:match("[-+]?%d*%.?%d+"))
-end
-
-local function readNumericFromObject(obj, keys)
-    for _, key in ipairs(keys) do
-        local value = parseNumber(readAttribute(obj, key))
-        if value ~= nil then
-            return value
-        end
-    end
-    return nil
-end
-
-local function findNumericValue(part, keys)
-    local current = part
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        local value = readNumericFromObject(current, keys)
-        if value ~= nil then
-            return value
-        end
+local function resolveNexusName(obj)
+    if not obj then return nil end
+    local current, depth = obj, 0
+    while current and current ~= Workspace and depth < 7 do
+        local norm = normalizeName(getObjectName(current))
+        if norm == "void nexus" or norm:find("void nexus", 1, true) then return "Void Nexus"
+        elseif norm == "solar nexus" or norm:find("solar nexus", 1, true) then return "Solar Nexus"
+        elseif norm == "aether nexus" or norm:find("aether nexus", 1, true) then return "Aether Nexus" end
         current = current.Parent
         depth += 1
     end
     return nil
-end
-
-local function extractMetricFromText(text, kind)
-    text = tostring(text or ""):gsub(",", "")
-    if kind == "weight" then
-        return parseNumber(text:match("([%d%.]+)%s*[kK][gG]"))
-    end
-    return parseNumber(text:match("%$%s*([%d%.]+)"))
-end
-
-local function getDisplayMetric(part, kind)
-    local current = part
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        local value = extractMetricFromText(getObjectName(current), kind)
-        if value ~= nil then
-            return value
-        end
-        current = current.Parent
-        depth += 1
-    end
-    return nil
-end
-
-local function getCrystalWeightKg(part)
-    return findNumericValue(part, {
-        "WeightKg", "Weight", "MassKg", "Mass", "CrystalWeight", "Kilograms",
-    }) or getDisplayMetric(part, "weight")
-end
-
-local function getCrystalPrice(part)
-    return findNumericValue(part, {
-        "Price", "SellPrice", "CrystalPrice", "Value", "Worth", "CashValue",
-    }) or getDisplayMetric(part, "price")
-end
-
-local normalizeName
-
-local function isCrystalCluster(obj)
-    if not obj or isForbiddenWorldObject(obj) then
-        return false
-    end
-    local text = normalizeName(getObjectName(obj))
-    return text:find("crystal", 1, true) ~= nil
-        and text:find("cluster", 1, true) ~= nil
-end
-
--- ================================================================
--- NEXUS DETECTION
--- ================================================================
-
-function normalizeName(name)
-    if type(name) ~= "string" then
-        return ""
-    end
-    return name
-        :lower()
-        :gsub("[%s_%-]+", " ")
-        :gsub("%s+", " ")
-        :match("^%s*(.-)%s*$")
-end
-
--- Metadata tetap dibaca internal dari object/parent, tetapi tidak pernah ditampilkan.
-local function getCrystalSearchText(obj)
-    local values = {}
-    local current = obj
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        table.insert(values, tostring(current.Name or ""))
-        table.insert(values, getObjectName(current))
-        for _, key in ipairs({
-            "ItemName", "CrystalName", "DisplayName", "ObjectName",
-            "CrystalType", "Type", "Category", "TierName", "Rarity",
-        }) do
-            local value = readAttribute(current, key)
-            if value ~= nil then
-                table.insert(values, tostring(value))
-            end
-        end
-        current = current.Parent
-        depth += 1
-    end
-    return normalizeName(table.concat(values, " "))
 end
 
 local function isCrystalTarget(obj)
-    if not obj or isForbiddenWorldObject(obj) then
-        return false
-    end
-    local text = getCrystalSearchText(obj)
-    local namedCrystal = text:find("crystal", 1, true) ~= nil
-        and (text:find("cluster", 1, true) ~= nil
-            or text:find("obsidian", 1, true) ~= nil
-            or text:find("ember", 1, true) ~= nil)
-    local hasMetric = getCrystalWeightKg(obj) ~= nil or getCrystalPrice(obj) ~= nil
-    return namedCrystal or hasMetric
-end
-
-local function resolveNexusName(obj)
-    if not obj then
-        return nil
-    end
-
-    local name = getObjectName(obj)
-    local normalized = normalizeName(name)
-
-    if normalized == "void nexus" then
-        return "Void Nexus"
-    elseif normalized == "solar nexus" then
-        return "Solar Nexus"
-    elseif normalized == "aether nexus" then
-        return "Aether Nexus"
-    end
-
-    -- Telusuri seluruh ancestor agar target jauh/nested langsung dikenali.
-    local ancestor = obj.Parent
-    while ancestor and ancestor ~= workspace do
-        local parentName = getObjectName(ancestor)
-        local parentNormalized = normalizeName(parentName)
-
-        if parentNormalized == "void nexus" then
-            return "Void Nexus"
-        elseif parentNormalized == "solar nexus" then
-            return "Solar Nexus"
-        elseif parentNormalized == "aether nexus" then
-            return "Aether Nexus"
+    if not obj or isForbiddenObject(obj) then return false end
+    local current, depth = obj, 0
+    while current and current ~= Workspace and depth < 7 do
+        local name = normalizeName(getObjectName(current))
+        if name:find("crystal", 1, true) or name:find("cluster", 1, true)
+            or name:find("obsidian", 1, true) or name:find("ember", 1, true)
+            or name:find("ore", 1, true) or name:find("gem", 1, true)
+            or name:find("constellation", 1, true) or name:find("hydra", 1, true) then
+            return true
         end
-
-        ancestor = ancestor.Parent
-    end
-
-    return nil
-end
-
-local function isWorldNexus(obj)
-    if not obj then
-        return false
-    end
-    if isForbiddenWorldObject(obj) then
-        return false
-    end
-    return resolveNexusName(obj) ~= nil
-end
-
--- ================================================================
--- GET WORLD PART
--- ================================================================
-
-local function getWorldPart(obj)
-    if not obj then
-        return nil
-    end
-
-    if obj:IsA("BasePart") then
-        return obj
-    end
-
-    if obj:IsA("Model") then
-        local primary = obj.PrimaryPart
-        if primary and primary:IsA("BasePart") then
-            return primary
+        if current:GetAttribute("Rarity") or current:GetAttribute("TierName")
+            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health") then
+            return true
         end
-
-        local part = obj:FindFirstChildWhichIsA("BasePart", true)
-        if part then
-            return part
-        end
-    end
-
-    if obj:IsA("Folder") then
-        return obj:FindFirstChildWhichIsA("BasePart", true)
-    end
-
-    return nil
-end
-
--- ================================================================
--- CRYSTAL CATEGORY
--- ================================================================
-
-local function getCrystalCategory(part)
-    if not part then
-        return nil
-    end
-
-    for _, key in ipairs({
-        "CrystalName", "CrystalType", "Type", "Kind", "Category",
-    }) do
-        local value = readStringAttribute(part, key)
-        if value then
-            for _, category in ipairs(CATEGORIES) do
-                if normalizeName(value) == normalizeName(category) then
-                    return category
-                end
-            end
-        end
-    end
-
-    local tierName = tostring(part:GetAttribute("TierName") or "")
-    local lower = tierName:lower()
-
-    for _, category in ipairs(CATEGORIES) do
-        if lower:find(category:lower(), 1, true) then
-            return category
-        end
-    end
-
-    return nil
-end
-
--- ================================================================
--- CRYSTAL SIZE
--- ================================================================
-
-local function getCrystalSize(part)
-    if not part then
-        return nil
-    end
-
-    for _, key in ipairs({
-        "Size", "CrystalSize", "SizeCategory",
-    }) do
-        local value = readStringAttribute(part, key)
-        if value then
-            for _, size in ipairs(SIZES) do
-                if normalizeName(value) == normalizeName(size) then
-                    return size
-                end
-            end
-        end
-    end
-
-    local tierName = tostring(part:GetAttribute("TierName") or "")
-    local objectText = normalizeName(getObjectName(part) .. " " .. tierName)
-
-    local current = part
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        objectText = objectText .. " " .. normalizeName(getObjectName(current))
         current = current.Parent
         depth += 1
     end
-
-    for _, size in ipairs(SIZES) do
-        if objectText:find(size:lower(), 1, true) then
-            return size
-        end
-    end
-
-    return nil
+    return false
 end
-
--- ================================================================
--- RARITY
--- ================================================================
 
 local RARITY_ALIAS_ORDER = {
     "tidak biasa", "legendaris", "uncommon", "legendary", "eksotis",
-    "exotic", "mythic", "mistik", "langka", "biasa", "common", "epik",
-    "rare", "epic",
+    "exotic", "mythic", "mistik", "langka", "biasa", "common", "epik", "rare", "epic",
 }
 
 local function getRarityName(part)
-    if not part then
-        return nil
-    end
-
-    local current = part
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
+    if not part then return nil end
+    local current, depth = part, 0
+    while current and current ~= Workspace and depth < 7 do
         local values = {
-            current:GetAttribute("Rarity"),
-            current:GetAttribute("TierName"),
-            current:GetAttribute("Tier"),
-            current:GetAttribute("RarityName"),
-            getObjectName(current),
+            current:GetAttribute("Rarity"), current:GetAttribute("TierName"),
+            current:GetAttribute("Tier"), current:GetAttribute("RarityName"), getObjectName(current),
         }
-
         for _, rawValue in ipairs(values) do
             local normalized = normalizeName(tostring(rawValue or ""))
             if normalized ~= "" then
@@ -722,657 +228,406 @@ local function getRarityName(part)
                 end
             end
         end
-
         current = current.Parent
         depth += 1
     end
-
     return nil
 end
 
--- ================================================================
--- STATIC METADATA CACHE (ringan tanpa pengaruh ke frame) - V2.0.0
--- ================================================================
--- Rarity/category/size/kg/price sebuah crystal praktis tidak pernah
--- berubah selama part itu ada. Sebelumnya nilai ini dihitung ULANG
--- setiap scan tick (5x/detik) untuk SETIAP target dalam radius --
--- itu penyebab utama lag.
---
--- V2.0.0: sekarang LAZY. Rarity (whitelist, selalu dipakai) dihitung
--- sekali pas target register. category/size/kg/price -- yang defaultnya
--- KOSONG dan sering emang gak pernah dipakai user -- baru dihitung
--- kalau filter itu betulan aktif, dan hasilnya di-cache permanen supaya
--- gak dihitung dua kali. Kalau user cuma pakai filter rarity (default),
--- 4 metadata itu gak pernah disentuh sama sekali = 0 biaya frame.
-
-local function getCachedCategory(part, info)
-    if not info.categoryComputed then
-        info.category = getCrystalCategory(part)
-        info.categoryComputed = true
-    end
-    return info.category
-end
-
-local function getCachedSize(part, info)
-    if not info.sizeComputed then
-        info.size = getCrystalSize(part)
-        info.sizeComputed = true
-    end
-    return info.size
-end
-
-local function getCachedWeight(part, info)
-    if not info.weightComputed then
-        info.weight = getCrystalWeightKg(part)
-        info.weightComputed = true
-    end
-    return info.weight
-end
-
-local function getCachedPrice(part, info)
-    if not info.priceComputed then
-        info.price = getCrystalPrice(part)
-        info.priceComputed = true
-    end
-    return info.price
-end
-
--- V9: nama di-cache permanen (dipakai label ringan)
-local function getCachedName(obj, part, info)
-    if not info.nameComputed then
-        info.name = getCleanCrystalName(obj, part)
-        info.nameComputed = true
-    end
-    return info.name
-end
-
--- ================================================================
--- FILTER
--- ================================================================
-
-local function passesFilter(part, info)
-    if not part or not info then
-        return false
-    end
-
-    -- Rarity whitelist: wajib dicentang
-    if next(selectedRarities) == nil then
-        return false
-    end
-
-    local rarity = info.rarity
-    if not rarity or not selectedRarities[rarity] then
-        return false
-    end
-
-    -- Category opsional (lazy cache)
-    if next(selectedCategories) then
-        local category = getCachedCategory(part, info)
-        if not category or not selectedCategories[category] then
-            return false
-        end
-    end
-
-    return true
-end
-
--- V5.0: rebuild list target yang lolos rarity (whitelist).
--- Dipanggil HANYA saat filter rarity/nexus berubah atau target baru masuk.
--- Scan loop tidak lagi iterasi seluruh worldTargets.
-local function rebuildFilteredTargets()
-    table.clear(filteredTargets)
-    if next(selectedRarities) == nil then
-        filteredDirty = false
-        return
-    end
-
-    local hasNexusFilter = next(selectedNexus) ~= nil
-
-    for obj in pairs(worldTargets) do
-        if obj and obj.Parent then
-            local info = targetInfo[obj]
-            if info and info.rarity and selectedRarities[info.rarity] then
-                -- Sama logika original: nexus filter kosong = semua; kalau ada, harus match nexus
-                if not hasNexusFilter or (info.nexus and selectedNexus[info.nexus]) then
-                    filteredTargets[#filteredTargets + 1] = obj
-                end
+local function getCrystalCategory(part)
+    if not part then return nil end
+    for _, key in ipairs({"CrystalName", "CrystalType", "Type", "Kind", "Category"}) do
+        local value = readStringAttribute(part, key)
+        if value then
+            for _, category in ipairs(CATEGORIES) do
+                if normalizeName(value) == normalizeName(category) then return category end
             end
         end
     end
-    filteredDirty = false
-end
-
-local function markFilteredDirty()
-    filteredDirty = true
-end
-
--- ================================================================
--- MARKER COLOR
--- ================================================================
-
-local CRYSTAL_COLORS = {
-    obsidian = Color3.fromRGB(155, 100, 220),
-    ember = Color3.fromRGB(255, 85, 35),
-    crystal = Color3.fromRGB(80, 210, 255),
-}
-
-local function markerColor(part, nexusName, rarityHint)
-    if nexusName and RARITY_COLORS[nexusName] then
-        return RARITY_COLORS[nexusName]
+    local tierName = tostring(part:GetAttribute("TierName") or ""):lower()
+    for _, category in ipairs(CATEGORIES) do
+        if tierName:find(category:lower(), 1, true) then return category end
     end
+    return nil
+end
 
+local function resolveColor(part, nexusName, rarityHint)
+    if nexusName and RARITY_COLORS[nexusName] then return RARITY_COLORS[nexusName] end
     local r = tonumber(part:GetAttribute("TierColorR"))
     local g = tonumber(part:GetAttribute("TierColorG"))
     local b = tonumber(part:GetAttribute("TierColorB"))
-    if r and g and b then
-        return Color3.fromRGB(r, g, b)
-    end
-
+    if r and g and b then return Color3.fromRGB(r, g, b) end
     local rarity = rarityHint or getRarityName(part)
-    if rarity and RARITY_COLORS[rarity] then
-        return RARITY_COLORS[rarity]
+    if rarity and RARITY_COLORS[rarity] then return RARITY_COLORS[rarity] end
+    local text = normalizeName(getObjectName(part))
+    for key, color in pairs(CRYSTAL_COLORS) do
+        if text:find(key, 1, true) then return color end
     end
-
-    local current = part
-    local depth = 0
-    while current and current ~= workspace and depth < 8 do
-        local text = normalizeName(getObjectName(current))
-        for key, color in pairs(CRYSTAL_COLORS) do
-            if text:find(key, 1, true) then
-                return color
-            end
-        end
-        current = current.Parent
-        depth += 1
-    end
-
     return Color3.fromRGB(200, 210, 230)
 end
 
-local function getCachedColor(part, info)
-    if not info.colorComputed then
-        info.color = markerColor(part, info.nexus, info.rarity)
-        info.colorComputed = true
-    end
-    return info.color
-end
-
--- ================================================================
--- MARKER CLEANUP
--- ================================================================
-
-local function destroyMarker(part)
-    local pack = markers[part]
-    if pack then
-        if typeof(pack) == "Instance" then
-            pcall(function() pack:Destroy() end)
-        else
-            if pack.hl then pcall(function() pack.hl:Destroy() end) end
-            if pack.bb then pcall(function() pack.bb:Destroy() end) end
-        end
-        markers[part] = nil
-    end
-end
-
-local function clearAllMarkers()
-    for part in pairs(markers) do
-        destroyMarker(part)
-    end
-end
-
--- V12: marker ONLY — Highlight warna-warni, tanpa nama/kg
-local function createMarkerPack(part, obj, info, color)
-    local hl = Instance.new("Highlight")
-    hl.Name = "EngineHL"
-    hl.FillTransparency = 0.55
-    hl.OutlineTransparency = 0
-    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.FillColor = color
-    hl.OutlineColor = color
-    hl.Adornee = part
-    hl.Parent = part
-
-    -- simpan rarity agar sticky pass bisa drop saat filter di-OFF
-    return { hl = hl, rarity = info and info.rarity or nil }
-end
-
--- ================================================================
--- TARGET CACHE
--- ================================================================
-
--- Dipanggil hanya SEKALI per target baru (bukan per scan tick).
--- V2.0.0: cuma rarity yang dihitung di sini (selalu wajib dipakai
--- sebagai whitelist). category/size/kg/price TIDAK dihitung kalau
--- filternya kosong -- lihat getCachedCategory/Size/Weight/Price di atas.
--- "part" juga di-cache di sini supaya scan() gak perlu getWorldPart()
--- (tree-search) ulang tiap 0.2 detik.
-local function buildTargetInfo(obj, nexus, crystal)
-    local part = getWorldPart(obj)
-    return {
-        nexus = nexus,
-        crystal = crystal,
-        part = part,
-        rarity = getRarityName(part),
-        category = nil, categoryComputed = false,
-        size = nil, sizeComputed = false,
-        weight = nil, weightComputed = false,
-        price = nil, priceComputed = false,
-        name = nil, nameComputed = false,
-        color = nil, colorComputed = false,
-    }
+local function getWorldPart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true) end
+    if obj:IsA("Folder") then return obj:FindFirstChildWhichIsA("BasePart", true) end
+    return nil
 end
 
 local function registerTarget(obj)
-    if not obj or isForbiddenWorldObject(obj) then
-        return
-    end
-
-    -- Register setiap part/model/folder di bawah Nexus agar beberapa
-    -- Crystal masuk radar bersamaan, bukan hanya part utama container.
-    if obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder") then
-        local nexus = resolveNexusName(obj)
-        local crystal = isCrystalTarget(obj)
-        if nexus or crystal then
-            worldTargets[obj] = true
-            targetTimestamps[obj] = tick()
-            targetInfo[obj] = buildTargetInfo(obj, nexus, crystal)
-            markFilteredDirty()
-        end
-    end
-end
-
-local function unregisterTarget(obj)
-    if not obj then
-        return
-    end
-
-    if worldTargets[obj] then
-        markFilteredDirty()
-    end
-
-    worldTargets[obj] = nil
-    targetTimestamps[obj] = nil
-    targetInfo[obj] = nil
-
+    if not obj or isForbiddenObject(obj) then return end
     local part = getWorldPart(obj)
-    if part then
-        destroyMarker(part)
+    if not part or targetRegistry[part] then return end
+    local nexus = resolveNexusName(obj) or resolveNexusName(part)
+    local crystal = isCrystalTarget(obj) or isCrystalTarget(part)
+    if nexus or crystal then
+        local rarity = getRarityName(part)
+        local data = {part = part, nexus = nexus, crystal = crystal, rarity = rarity, category = nil, color = resolveColor(part, nexus, rarity)}
+        targetRegistry[part] = data
+        table.insert(targetList, data)
     end
-
-    destroyMarker(obj)
 end
 
--- ================================================================
--- INITIAL WORLD CACHE (V12 — async chunked, tidak freeze frame)
--- ================================================================
-
-local cacheBuilding = false
-
-local function buildInitialCacheAsync()
-    if cacheBuilding then
-        return
-    end
-    cacheBuilding = true
-
-    task.spawn(function()
-        local descendants = workspace:GetDescendants()
-        local now = tick()
-        for index, obj in ipairs(descendants) do
-            if obj and obj.Parent and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
-                if not worldTargets[obj] and not isForbiddenWorldObject(obj) then
-                    local nexus = resolveNexusName(obj)
-                    local crystal = isCrystalTarget(obj)
-                    if nexus or crystal then
-                        worldTargets[obj] = true
-                        targetTimestamps[obj] = now
-                        targetInfo[obj] = buildTargetInfo(obj, nexus, crystal)
-                    end
-                end
-            end
-            -- yield tiap 80 object → 0 freeze saat load
-            if index % 80 == 0 then
-                task.wait()
-            end
-        end
-        markFilteredDirty()
-        cacheBuilding = false
-    end)
-end
-
--- Soft warm-up di background (bukan blocking)
-buildInitialCacheAsync()
-
--- ================================================================
--- DYNAMIC WORLD EVENTS
--- ================================================================
-
-local function processPendingAdds()
-    for obj in pairs(pendingAdds) do
-        if obj and obj.Parent then
-            registerTarget(obj)
-            local parent = obj.Parent
-            if parent then
-                registerTarget(parent)
-            end
-        end
-    end
-
-    table.clear(pendingAdds)
-    addProcessTimer = nil
-end
-
-table.insert(
-    worldConnections,
-    workspace.DescendantAdded:Connect(function(obj)
-        registerTarget(obj)
-        pendingAdds[obj] = true
-
-        if not addProcessTimer then
-            addProcessTimer = task.delay(0.1, processPendingAdds)
-        end
-    end)
-)
-
-table.insert(
-    worldConnections,
-    workspace.DescendantRemoving:Connect(function(obj)
-        unregisterTarget(obj)
-        pendingAdds[obj] = nil
-    end)
-)
-
--- ================================================================
--- RADAR SCAN (V10 — sticky 200m, filter-first, distance², smooth 40 marker)
--- ================================================================
-
-local function scan()
-    if not radarOn then
-        return
-    end
-
-    -- Tanpa rarity dicentang → tidak scan apa pun
-    if next(selectedRarities) == nil then
-        clearAllMarkers()
-        return
-    end
-
-    local character = localPlayer.Character
-
-    if not character then
-        clearAllMarkers()
-        return
-    end
-
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-
-    if not hrp then
-        clearAllMarkers()
-        return
-    end
-
-    local origin = hrp.Position
-    local ox, oy, oz = origin.X, origin.Y, origin.Z
-    local radiusSq = CONFIG.scanRadiusSq
-    local dropSq = CONFIG.dropRadiusSq
-    local found = {}
-    local seen = {}
-    -- part yang masih dalam radius (untuk sticky keep)
-    local inRangeParts = {}
-
-    -- Rebuild filtered list hanya bila dirty
-    if filteredDirty then
-        rebuildFilteredTargets()
-    end
-
-    local list = filteredTargets
-    local n = #list
-    local chunk = CONFIG.scanChunkSize
-    local needRebuild = false
-
-    for i = 1, n do
-        local obj = list[i]
-        if not obj or not obj.Parent then
-            needRebuild = true
-        else
-            local info = targetInfo[obj]
-            if info then
-                local part = info.part
-                if not part or not part.Parent then
-                    part = getWorldPart(obj)
-                    info.part = part
-                end
-
-                if part and part.Parent and not seen[part] then
-                    seen[part] = true
-
-                    local p = part.Position
-                    local dx = p.X - ox
-                    local dy = p.Y - oy
-                    local dz = p.Z - oz
-                    local distSq = dx * dx + dy * dy + dz * dz
-
-                    -- STICKY: catat semua part dalam drop radius (bukan hanya top-N)
-                    if distSq <= dropSq then
-                        inRangeParts[part] = true
-                    end
-
-                    if distSq <= radiusSq then
-                        if passesFilter(part, info) then
-                            found[#found + 1] = {
-                                object = obj,
-                                part = part,
-                                distance = math.sqrt(distSq),
-                                nexus = info.nexus,
-                                distSq = distSq,
-                            }
-                        end
-                    end
-                end
-            end
-        end
-
-        -- yield hanya jika list panjang (hindari stuck, tapi jangan spam yield)
-        if n > chunk and i % chunk == 0 and i < n then
-            task.wait()
-            if not radarOn then
-                return
-            end
-            if hrp.Parent then
-                origin = hrp.Position
-                ox, oy, oz = origin.X, origin.Y, origin.Z
-            end
-        end
-    end
-
-    if needRebuild then
-        markFilteredDirty()
-    end
-
-    -- FALLBACK SCAN jarang
-    local currentTime = tick()
-
-    if (currentTime - lastFallbackScan) >= CONFIG.fallbackScanInterval
-    and not fallbackScanBusy then
-        lastFallbackScan = currentTime
-        fallbackScanBusy = true
-
-        task.spawn(function()
-            local descendants = workspace:GetDescendants()
-            local added = false
-            for index, obj in ipairs(descendants) do
-                if not radarOn then
-                    break
-                end
-
-                if obj and obj.Parent and not isForbiddenWorldObject(obj) then
-                    if worldTargets[obj] then
-                        targetTimestamps[obj] = currentTime
-                    else
-                        if obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder") then
-                            local nexus = resolveNexusName(obj)
-                            local crystal = isCrystalTarget(obj)
-                            if nexus or crystal then
-                                worldTargets[obj] = true
-                                targetTimestamps[obj] = currentTime
-                                targetInfo[obj] = buildTargetInfo(obj, nexus, crystal)
-                                added = true
-                            end
-                        end
-                    end
-                end
-
-                if index % 150 == 0 then
-                    task.wait()
-                end
-            end
-            if added then
-                markFilteredDirty()
-            end
-            fallbackScanBusy = false
-        end)
-    end
-
-    -- SORT TERDEKAT (untuk prioritas NEW marker)
-    table.sort(found, function(a, b)
-        return a.distance < b.distance
-    end)
-
-    -- ============================================================
-    -- STICKY MARKERS (V10):
-    -- 1) Marker yang SUDAH ada: tetap hidup selama part valid + jarak ≤ dropRadius (210m)
-    --    → tidak hilang hanya karena keluar top-N / ranking berubah
-    -- 2) Marker BARU: dibuat sampai maxMarkers untuk crystal dalam 200m
-    -- 3) Hapus HANYA jika: part hilang, gagal filter, atau jarak > 200/210m
-    -- ============================================================
-    local keep = {}
-    local activeCount = 0
-
-    -- Pass 1: sticky — tetap hidup jika dalam radius DAN rarity masih dicentang
-    for part, pack in pairs(markers) do
-        local ok = false
-        if part and part.Parent and pack and pack.hl and pack.hl.Parent then
-            local rarityOk = pack.rarity and selectedRarities[pack.rarity]
-            if rarityOk then
-                local p = part.Position
-                local dx = p.X - ox
-                local dy = p.Y - oy
-                local dz = p.Z - oz
-                local distSq = dx * dx + dy * dy + dz * dz
-                if distSq <= dropSq then
-                    ok = true
-                    keep[part] = true
-                    activeCount += 1
-                end
-            end
-        end
-        if not ok then
-            destroyMarker(part)
-        end
-    end
-
-    -- Pass 2: soft-start — max 10 marker BARU per tick (hindari lag spike ON)
-    local amount = #found
-    local newBudget = 10
-    local created = 0
-
-    for i = 1, amount do
-        if activeCount >= CONFIG.maxMarkers then
-            break
-        end
-        if created >= newBudget then
-            break
-        end
-
-        local data = found[i]
-        local part = data.part
-        local obj = data.object
-
-        if part and part.Parent and not keep[part] then
-            local pack = markers[part]
-            local alive = pack and pack.hl and pack.hl.Parent
-
-            if not alive then
-                local info = targetInfo[obj]
-                if not info then
-                    info = buildTargetInfo(obj, data.nexus, true)
-                    targetInfo[obj] = info
-                end
-                if passesFilter(part, info) then
-                    local color = getCachedColor(part, info)
-                    pack = createMarkerPack(part, obj, info, color)
-                    markers[part] = pack
-                    keep[part] = true
-                    activeCount += 1
-                    created += 1
-                end
-            else
-                keep[part] = true
+local function unregisterTarget(part)
+    if targetRegistry[part] then
+        targetRegistry[part] = nil
+        releaseHighlight(part)
+        for i = #targetList, 1, -1 do
+            if targetList[i].part == part then
+                table.remove(targetList, i)
+                break
             end
         end
     end
 end
-
--- ================================================================
--- RADAR LOOP
--- ================================================================
 
 task.spawn(function()
-    while true do
-        if radarOn and not scanRunning then
-            scanRunning = true
-            local ok, err = pcall(scan)
-            scanRunning = false
-            if not ok then
-                warn("ENGINE radar scan error:", err)
-            end
+    local desc = Workspace:GetDescendants()
+    for i = 1, #desc do
+        local obj = desc[i]
+        if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
+            pcall(registerTarget, obj)
         end
-        task.wait(CONFIG.radarInterval)
+        if i % 450 == 0 then task.wait() end
     end
 end)
 
--- ================================================================
--- GUI
--- ================================================================
+Workspace.DescendantAdded:Connect(function(obj)
+    if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
+        task.defer(function() pcall(registerTarget, obj) end)
+    end
+end)
 
-local old = playerGui:FindFirstChild("EngineGUI")
-if old then
-    old:Destroy()
+Workspace.DescendantRemoving:Connect(function(obj)
+    if obj:IsA("BasePart") then unregisterTarget(obj) end
+end)
+
+local function passesFilter(data)
+    if not data or next(selectedRarities) == nil then return false end
+    if not data.rarity or not selectedRarities[data.rarity] then return false end
+    if next(selectedNexus) and (not data.nexus or not selectedNexus[data.nexus]) then return false end
+    if next(selectedCategories) then
+        if not data.category then data.category = getCrystalCategory(data.part) end
+        if not data.category or not selectedCategories[data.category] then return false end
+    end
+    return true
 end
 
+local function scanRealTime()
+    if not radarOn or next(selectedRarities) == nil then
+        if next(activeMarkers) then clearAllMarkers() end
+        return
+    end
+    local character = localPlayer.Character
+    if not character then clearAllMarkers() return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then clearAllMarkers() return end
+
+    local origin = hrp.Position
+    local ox, oy, oz = origin.X, origin.Y, origin.Z
+    local radiusSq, dropSq = CONFIG.scanRadiusSq, CONFIG.dropRadiusSq
+    local foundCount = 0
+
+    for i = 1, #targetList do
+        local data = targetList[i]
+        local part = data.part
+        if part and part.Parent then
+            local pos = part.Position
+            local dx = pos.X - ox
+            if dx * dx <= radiusSq then
+                local dz = pos.Z - oz
+                if dz * dz <= radiusSq then
+                    local dy = pos.Y - oy
+                    local distSq = dx*dx + dy*dy + dz*dz
+                    if distSq <= radiusSq and passesFilter(data) then
+                        foundCount += 1
+                        if foundCount <= MAX_FOUND_BUFFER then
+                            local slot = foundSlots[foundCount]
+                            slot.part, slot.data, slot.dist = part, data, distSq
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local actualFound = math.min(foundCount, MAX_FOUND_BUFFER)
+    table.sort(foundSlots, function(a, b)
+        if a.dist == 0 then return false end
+        if b.dist == 0 then return true end
+        return a.dist < b.dist
+    end)
+
+    table.clear(keepBuffer)
+    local activeCount = 0
+    for part, pack in pairs(activeMarkers) do
+        local valid = false
+        if part and part.Parent and pack.hl and pack.rarity and selectedRarities[pack.rarity] then
+            local pos = part.Position
+            local dx, dy, dz = pos.X - ox, pos.Y - oy, pos.Z - oz
+            if (dx*dx + dy*dy + dz*dz) <= dropSq then
+                valid = true
+                keepBuffer[part] = true
+                activeCount += 1
+            end
+        end
+        if not valid then releaseHighlight(part) end
+    end
+
+    for i = 1, actualFound do
+        if activeCount >= CONFIG.maxMarkers then break end
+        local slot = foundSlots[i]
+        local part = slot.part
+        if part and not keepBuffer[part] then
+            if not activeMarkers[part] then
+                local hl = acquireHighlight(part, slot.data.color)
+                activeMarkers[part] = {hl = hl, rarity = slot.data.rarity}
+                activeCount += 1
+            end
+            keepBuffer[part] = true
+        end
+    end
+
+    for i = 1, actualFound do
+        foundSlots[i].dist, foundSlots[i].part, foundSlots[i].data = 0, nil, nil
+    end
+end
+
+-- Instant Pickup
+task.spawn(function()
+    while true do
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") then
+                pcall(function()
+                    if obj.HoldDuration and obj.HoldDuration > 0 then obj.HoldDuration = 0 end
+                    obj.RequiresLineOfSight = false
+                end)
+            end
+        end
+        task.wait(3.2)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    local now = tick()
+    if radarOn and not scanRunning then
+        local character = localPlayer.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local pos = hrp.Position
+            local delta = (pos - lastHrpPos).Magnitude
+            isMoving = (delta * delta) > CONFIG.moveThresholdSq
+            if isMoving then lastHrpPos = pos end
+        end
+        local interval = isMoving and CONFIG.radarIntervalMove or CONFIG.radarIntervalIdle
+        if (now - lastScanClock) >= interval then
+            lastScanClock = now
+            scanRunning = true
+            pcall(scanRealTime)
+            scanRunning = false
+        end
+    end
+    if now - lastCleanup > CONFIG.cleanupInterval then
+        lastCleanup = now
+        for i = #targetList, 1, -1 do
+            local data = targetList[i]
+            if not data.part or not data.part.Parent then unregisterTarget(data.part) end
+        end
+    end
+end)
+
+-- Ultra FPS 80+
+local boosterBackup = {effects = {}, savedSettings = {}}
+local boosterEvent = nil
+
+local function enableGameBooster()
+    boosterBackup.globalShadows = Lighting.GlobalShadows
+    boosterBackup.fogEnd = Lighting.FogEnd
+    boosterBackup.brightness = Lighting.Brightness
+
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        Lighting.FogStart = 0
+        Lighting.Brightness = 1.25
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+        Lighting.Ambient = Color3.fromRGB(50, 50, 50)
+        Lighting.OutdoorAmbient = Color3.fromRGB(50, 50, 50)
+    end)
+
+    table.clear(boosterBackup.effects)
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("PostProcessEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
+            or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
+            boosterBackup.effects[effect] = effect.Enabled
+            pcall(function() effect.Enabled = false end)
+        end
+    end
+
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        boosterBackup.terrainDecoration = terrain.Decoration
+        boosterBackup.waterWaveSize = terrain.WaterWaveSize
+        boosterBackup.waterWaveSpeed = terrain.WaterWaveSpeed
+        pcall(function()
+            terrain.Decoration = false
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+            terrain.WaterReflectance = 0
+        end)
+    end
+
+    pcall(function()
+        if UserGameSettings then
+            boosterBackup.savedSettings.SavedQualityLevel = UserGameSettings.SavedQualityLevel
+            UserGameSettings.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+        end
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+
+    if boosterEvent then boosterEvent:Disconnect() end
+    boosterEvent = Workspace.DescendantAdded:Connect(function(obj)
+        if not boosterOn then return end
+        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+            or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+            pcall(function() obj.Enabled = false end)
+        elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
+            pcall(function() obj.CastShadow = false end)
+        end
+    end)
+
+    task.spawn(function()
+        local count = 0
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if not boosterOn then break end
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+                or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                pcall(function() obj.Enabled = false end)
+            elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
+                pcall(function() obj.CastShadow = false end)
+            end
+            count += 1
+            if count % 300 == 0 then task.wait() end
+        end
+    end)
+end
+
+local function disableGameBooster()
+    if boosterEvent then boosterEvent:Disconnect() boosterEvent = nil end
+    pcall(function()
+        if boosterBackup.globalShadows ~= nil then Lighting.GlobalShadows = boosterBackup.globalShadows end
+        if boosterBackup.fogEnd ~= nil then Lighting.FogEnd = boosterBackup.fogEnd end
+        if boosterBackup.brightness ~= nil then Lighting.Brightness = boosterBackup.brightness end
+        Lighting.EnvironmentDiffuseScale = 1
+        Lighting.EnvironmentSpecularScale = 1
+    end)
+    for effect, state in pairs(boosterBackup.effects) do
+        if effect and effect.Parent then pcall(function() effect.Enabled = state end) end
+    end
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        pcall(function()
+            if boosterBackup.terrainDecoration ~= nil then terrain.Decoration = boosterBackup.terrainDecoration end
+            if boosterBackup.waterWaveSize ~= nil then terrain.WaterWaveSize = boosterBackup.waterWaveSize end
+            if boosterBackup.waterWaveSpeed ~= nil then terrain.WaterWaveSpeed = boosterBackup.waterWaveSpeed end
+        end)
+    end
+    pcall(function()
+        if UserGameSettings and boosterBackup.savedSettings.SavedQualityLevel then
+            UserGameSettings.SavedQualityLevel = boosterBackup.savedSettings.SavedQualityLevel
+        end
+    end)
+end
+
+-- Speed 2x Modern
+local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
+local speedConn, speedRenderConn = nil, nil
+
+local function applySpeed(hum)
+    if hum and speedOn and hum.WalkSpeed ~= targetSpeed() then
+        hum.WalkSpeed = targetSpeed()
+    end
+end
+
+local function hookSpeed()
+    if speedConn then speedConn:Disconnect() end
+    if speedRenderConn then speedRenderConn:Disconnect() end
+    local char = localPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if speedOn then applySpeed(hum) end
+    end)
+    speedRenderConn = RunService.RenderStepped:Connect(function()
+        if not speedOn then return end
+        local c = localPlayer.Character
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        if h then applySpeed(h) end
+    end)
+    applySpeed(hum)
+end
+
+local function unhookSpeed()
+    if speedConn then speedConn:Disconnect() speedConn = nil end
+    if speedRenderConn then speedRenderConn:Disconnect() speedRenderConn = nil end
+    local char = localPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = CONFIG.normalSpeed end
+end
+
+localPlayer.CharacterAdded:Connect(function()
+    task.wait(0.4)
+    if speedOn then hookSpeed() end
+end)
+
+-- GUI
+local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
+if old then old:Destroy() end
+
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "EngineGUI"
+screenGui.Name = "GecMineAntarctica"
 screenGui.IgnoreGuiInset = true
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
--- ================================================================
--- OUTER MAIN
--- ================================================================
-
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 430, 0, 350)
-outer.Position = UDim2.new(0, 12, 0.5, -160)
+outer.Size = UDim2.new(0, 430, 0, 360)
+outer.Position = UDim2.new(0, 12, 0.5, -165)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
 outer.Active = true
-
 Instance.new("UICorner", outer).CornerRadius = UDim.new(0, 16)
-
-local oStroke = Instance.new("UIStroke", outer)
-oStroke.Color = Color3.fromRGB(45, 45, 52)
-oStroke.Thickness = 1
-
--- ================================================================
--- TITLE BAR
--- ================================================================
+Instance.new("UIStroke", outer).Color = Color3.fromRGB(45, 45, 52)
 
 local titleBar = Instance.new("Frame", outer)
 titleBar.Size = UDim2.new(1, 0, 0, 28)
 titleBar.BackgroundColor3 = C.accent
 titleBar.BackgroundTransparency = 0.25
 titleBar.BorderSizePixel = 0
-
 Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 16)
 
 local tbFix = Instance.new("Frame", titleBar)
@@ -1385,7 +640,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "⚡ Engine V16 PRO • V12"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Clean"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -1401,21 +656,12 @@ minBtn.BackgroundColor3 = Color3.fromRGB(70, 80, 110)
 minBtn.Font = Enum.Font.GothamBold
 minBtn.TextSize = 11
 minBtn.BorderSizePixel = 0
-
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
-
--- ================================================================
--- LEFT ICONS (MAIN CONTROLS)
--- ================================================================
 
 local leftCol = Instance.new("Frame", outer)
 leftCol.Size = UDim2.new(0, 48, 1, -38)
 leftCol.Position = UDim2.new(0, 6, 0, 34)
 leftCol.BackgroundTransparency = 1
-
-local CYAN = Color3.fromRGB(0, 200, 255)
-local PINK = Color3.fromRGB(255, 100, 160)
-local LIME = Color3.fromRGB(100, 255, 100)
 
 local function makeIconButton(yPos, icon, gradA, gradB)
     local btn = Instance.new("TextButton", leftCol)
@@ -1427,17 +673,13 @@ local function makeIconButton(yPos, icon, gradA, gradB)
     btn.Font = Enum.Font.GothamBold
     btn.BackgroundColor3 = C.black
     btn.BorderSizePixel = 0
-
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 11)
-
     local stroke = Instance.new("UIStroke", btn)
     stroke.Color = Color3.fromRGB(45, 45, 52)
     stroke.Thickness = 1.5
-
     local grad = Instance.new("UIGradient", btn)
     grad.Color = ColorSequence.new(gradB, gradB)
     grad.Transparency = NumberSequence.new(0.88)
-
     local function setVisual(on)
         if on then
             grad.Color = ColorSequence.new(gradA, gradB)
@@ -1449,17 +691,16 @@ local function makeIconButton(yPos, icon, gradA, gradB)
             stroke.Color = Color3.fromRGB(45, 45, 52)
         end
     end
-
     return btn, setVisual
 end
+
+local CYAN = Color3.fromRGB(0, 200, 255)
+local PINK = Color3.fromRGB(255, 100, 160)
+local LIME = Color3.fromRGB(100, 255, 100)
 
 local speedBtn, setSpeedVis = makeIconButton(0, "⚡", C.accent, CYAN)
 local radarBtn, setRadarVis = makeIconButton(46, "◎", C.orange, PINK)
 local settingsBtn, setSettingsVis = makeIconButton(92, "⚙", C.green, LIME)
-
--- ================================================================
--- DIVIDER
--- ================================================================
 
 local divider = Instance.new("Frame", outer)
 divider.Size = UDim2.new(0, 1, 1, -46)
@@ -1467,21 +708,12 @@ divider.Position = UDim2.new(0, 60, 0, 40)
 divider.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
 divider.BorderSizePixel = 0
 
--- ================================================================
--- RIGHT CONTENT AREA
--- ================================================================
-
 local rightCol = Instance.new("Frame", outer)
 rightCol.Size = UDim2.new(1, -74, 1, -46)
 rightCol.Position = UDim2.new(0, 66, 0, 34)
 rightCol.BackgroundTransparency = 1
 
--- ================================================================
--- PAGE RADAR
--- ================================================================
-
 local radarPage = Instance.new("Frame", rightCol)
-radarPage.Name = "RadarPage"
 radarPage.Size = UDim2.new(1, 0, 1, 0)
 radarPage.BackgroundTransparency = 1
 radarPage.Visible = true
@@ -1496,7 +728,6 @@ fTitle.TextXAlignment = Enum.TextXAlignment.Left
 fTitle.BackgroundTransparency = 1
 
 local radarStatus
-
 local radarToggleBtn = Instance.new("TextButton", radarPage)
 radarToggleBtn.Size = UDim2.new(0, 50, 0, 16)
 radarToggleBtn.Position = UDim2.new(1, -50, 0, -2)
@@ -1515,24 +746,12 @@ radarToggleBtn.MouseButton1Click:Connect(function()
     radarOn = not radarOn
     setRadarVis(radarOn)
     refreshRadarToggle()
-
     if radarOn then
-        -- V12: TIDAK rebuild cache penuh (itu penyebab lag lama)
-        -- pakai cache yang sudah ada + DescendantAdded events
-        radarStatus.Text = "WORLD • 200M • MARKER • SCANNING"
-        markFilteredDirty()
-        -- soft-start: scan ringan di frame berikutnya
-        task.defer(function()
-            if radarOn then
-                scan()
-            end
-        end)
-        -- background warm-up bila cache masih kosong
-        if next(worldTargets) == nil then
-            buildInitialCacheAsync()
-        end
+        radarStatus.Text = "ANTARCTICA • 210M • 36 MARKERS • ON"
+        lastScanClock = 0
+        task.defer(scanRealTime)
     else
-        radarStatus.Text = "WORLD • 200M • MARKER ONLY"
+        radarStatus.Text = "ANTARCTICA • 210M • OFF"
         clearAllMarkers()
     end
 end)
@@ -1544,14 +763,13 @@ catScroll.BackgroundTransparency = 1
 catScroll.BorderSizePixel = 0
 catScroll.ScrollingDirection = Enum.ScrollingDirection.XY
 catScroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
-catScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 catScroll.ScrollBarThickness = 2
-
 local catGrid = Instance.new("UIGridLayout", catScroll)
 catGrid.CellSize = UDim2.new(0, 54, 0, 13)
 catGrid.CellPadding = UDim2.new(0, 3, 0, 3)
 
 local toggleButtons = {}
+local updateFilterStatus
 
 local function makeToggleButton(name, color, getState, setState)
     local b = Instance.new("TextButton", catScroll)
@@ -1562,90 +780,39 @@ local function makeToggleButton(name, color, getState, setState)
     b.BackgroundColor3 = C.black
     b.BorderSizePixel = 0
     b.TextTruncate = Enum.TextTruncate.AtEnd
-
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
-
-    toggleButtons[name] = {
-        btn = b,
-        get = getState,
-        color = color,
-    }
-
+    toggleButtons[name] = {btn = b, get = getState, color = color}
     b.MouseButton1Click:Connect(function()
         setState()
         b.BackgroundColor3 = getState() and color or C.black
         updateFilterStatus()
-
         if radarOn then
-            -- rarity semua OFF → marker langsung ilang
-            if next(selectedRarities) == nil then
-                clearAllMarkers()
-            else
-                task.defer(scan)
-            end
+            if next(selectedRarities) == nil then clearAllMarkers()
+            else task.defer(scanRealTime) end
         end
     end)
 end
 
--- Rarity multi-select: OFF = marker ilang, ON = muncul lagi
-
 for _, rarity in ipairs(RARITIES) do
     makeToggleButton(RARITY_UI_LABELS[rarity], RARITY_COLORS[rarity],
-        function()
-            return selectedRarities[rarity] == true
-        end,
-        function()
-            if selectedRarities[rarity] then
-                selectedRarities[rarity] = nil
-            else
-                selectedRarities[rarity] = true
-            end
-            markFilteredDirty()
-        end
-    )
+        function() return selectedRarities[rarity] == true end,
+        function() selectedRarities[rarity] = not selectedRarities[rarity] or nil end)
 end
-
 for _, nexus in ipairs(NEXUS) do
     makeToggleButton(nexus, RARITY_COLORS[nexus],
-        function()
-            return selectedNexus[nexus] == true
-        end,
-        function()
-            if selectedNexus[nexus] then
-                selectedNexus[nexus] = nil
-            else
-                selectedNexus[nexus] = true
-            end
-            markFilteredDirty()
-        end
-    )
+        function() return selectedNexus[nexus] == true end,
+        function() selectedNexus[nexus] = not selectedNexus[nexus] or nil end)
 end
-
--- Mythic sudah menjadi bagian dari daftar rarity multi-select.
-
 for _, category in ipairs(CATEGORIES) do
     makeToggleButton(category, RARITY_COLORS[category],
-        function()
-            return selectedCategories[category] == true
-        end,
-        function()
-            if selectedCategories[category] then
-                selectedCategories[category] = nil
-            else
-                selectedCategories[category] = true
-            end
-        end
-    )
+        function() return selectedCategories[category] == true end,
+        function() selectedCategories[category] = not selectedCategories[category] or nil end)
 end
-
-local updateFilterStatus
-
--- V11: size / kg / price UI dihapus agar lebih ringan
 
 radarStatus = Instance.new("TextLabel", radarPage)
 radarStatus.Size = UDim2.new(1, 0, 0, 22)
 radarStatus.Position = UDim2.new(0, 0, 0, 52)
-radarStatus.Text = "WORLD • 200M • MARKER ONLY"
+radarStatus.Text = "ANTARCTICA • 210M • OFF"
 radarStatus.TextColor3 = C.textMain
 radarStatus.TextSize = 9
 radarStatus.Font = Enum.Font.GothamBold
@@ -1654,22 +821,18 @@ radarStatus.TextYAlignment = Enum.TextYAlignment.Center
 radarStatus.BackgroundColor3 = C.black
 radarStatus.BackgroundTransparency = 0.1
 radarStatus.BorderSizePixel = 0
-
 Instance.new("UICorner", radarStatus).CornerRadius = UDim.new(0, 7)
-
-local statusPadding = Instance.new("UIPadding", radarStatus)
-statusPadding.PaddingLeft = UDim.new(0, 7)
+Instance.new("UIPadding", radarStatus).PaddingLeft = UDim.new(0, 7)
 
 local resetBtn = Instance.new("TextButton", radarPage)
 resetBtn.Size = UDim2.new(1, 0, 0, 22)
 resetBtn.Position = UDim2.new(0, 0, 0, 78)
-resetBtn.Text = "↺ RESET"
+resetBtn.Text = "↺ RESET FILTER"
 resetBtn.TextColor3 = Color3.new(1, 1, 1)
 resetBtn.BackgroundColor3 = C.red
 resetBtn.Font = Enum.Font.GothamBold
 resetBtn.TextSize = 9
 resetBtn.BorderSizePixel = 0
-
 Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 7)
 
 local filterStatus = Instance.new("TextLabel", radarPage)
@@ -1684,12 +847,7 @@ filterStatus.TextYAlignment = Enum.TextYAlignment.Top
 filterStatus.BackgroundTransparency = 1
 filterStatus.TextWrapped = true
 
--- ================================================================
--- PAGE SETTINGS
--- ================================================================
-
 local settingsPage = Instance.new("Frame", rightCol)
-settingsPage.Name = "SettingsPage"
 settingsPage.Size = UDim2.new(1, 0, 1, 0)
 settingsPage.BackgroundTransparency = 1
 settingsPage.Visible = false
@@ -1703,244 +861,149 @@ pTitle.Font = Enum.Font.GothamBold
 pTitle.TextXAlignment = Enum.TextXAlignment.Left
 pTitle.BackgroundTransparency = 1
 
-local pStatus = Instance.new("TextLabel", settingsPage)
-pStatus.Size = UDim2.new(1, 0, 0, 28)
-pStatus.Position = UDim2.new(0, 0, 0, 18)
-pStatus.Text = "SOON FEATURE\nFast Mine / Pickup"
-pStatus.TextColor3 = C.textSub
-pStatus.TextSize = 8
-pStatus.Font = Enum.Font.Gotham
-pStatus.TextXAlignment = Enum.TextXAlignment.Left
-pStatus.TextYAlignment = Enum.TextYAlignment.Top
-pStatus.BackgroundColor3 = C.black
-pStatus.BackgroundTransparency = 0.2
-pStatus.BorderSizePixel = 0
-pStatus.TextWrapped = true
+local boosterCard = Instance.new("Frame", settingsPage)
+boosterCard.Size = UDim2.new(1, 0, 0, 48)
+boosterCard.Position = UDim2.new(0, 0, 0, 20)
+boosterCard.BackgroundColor3 = C.black
+boosterCard.BackgroundTransparency = 0.2
+boosterCard.BorderSizePixel = 0
+Instance.new("UICorner", boosterCard).CornerRadius = UDim.new(0, 7)
 
-Instance.new("UICorner", pStatus).CornerRadius = UDim.new(0, 6)
+local bInfoLabel = Instance.new("TextLabel", boosterCard)
+bInfoLabel.Size = UDim2.new(1, -70, 1, 0)
+bInfoLabel.Position = UDim2.new(0, 8, 0, 0)
+bInfoLabel.Text = "⚡ ULTRA FPS 80+\nGraphics Optimized • Cooler"
+bInfoLabel.TextColor3 = C.textMain
+bInfoLabel.TextSize = 8
+bInfoLabel.Font = Enum.Font.GothamBold
+bInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
+bInfoLabel.TextYAlignment = Enum.TextYAlignment.Center
+bInfoLabel.BackgroundTransparency = 1
 
-local pPadding = Instance.new("UIPadding", pStatus)
-pPadding.PaddingLeft = UDim.new(0, 6)
-pPadding.PaddingTop = UDim.new(0, 3)
+local boosterToggleBtn = Instance.new("TextButton", boosterCard)
+boosterToggleBtn.Size = UDim2.new(0, 52, 0, 24)
+boosterToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
+boosterToggleBtn.Text = "BOOST OFF"
+boosterToggleBtn.TextColor3 = Color3.new(1, 1, 1)
+boosterToggleBtn.TextSize = 7
+boosterToggleBtn.Font = Enum.Font.GothamBold
+boosterToggleBtn.BackgroundColor3 = C.red
+boosterToggleBtn.BorderSizePixel = 0
+Instance.new("UICorner", boosterToggleBtn).CornerRadius = UDim.new(0, 6)
 
-local soonFeature = Instance.new("TextLabel", settingsPage)
-soonFeature.Size = UDim2.new(1, 0, 0, 42)
-soonFeature.Position = UDim2.new(0, 0, 0, 49)
-soonFeature.Text = "SOON FEATURE\nFast Mine / Pickup"
-soonFeature.TextColor3 = C.textSub
-soonFeature.TextSize = 8
-soonFeature.Font = Enum.Font.GothamBold
-soonFeature.TextXAlignment = Enum.TextXAlignment.Left
-soonFeature.TextYAlignment = Enum.TextYAlignment.Center
-soonFeature.BackgroundColor3 = C.black
-soonFeature.BackgroundTransparency = 0.2
-soonFeature.BorderSizePixel = 0
-soonFeature.TextWrapped = true
-Instance.new("UICorner", soonFeature).CornerRadius = UDim.new(0, 6)
-
-local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 98)
-pInfo.Size = UDim2.new(1, 0, 0, 42)
-pInfo.Text = "Fast Mine dan Pickup dinonaktifkan pada V3.0.\nRadar tetap aktif dengan cache multi-Crystal jarak jauh."
-pInfo.TextColor3 = C.textSub
-pInfo.TextSize = 7
-pInfo.Font = Enum.Font.Gotham
-pInfo.TextXAlignment = Enum.TextXAlignment.Left
-pInfo.TextYAlignment = Enum.TextYAlignment.Top
-pInfo.BackgroundTransparency = 1
-pInfo.TextWrapped = true
-
--- ================================================================
--- FILTER STATUS UPDATE
--- ================================================================
-
--- FAST MINE / PICKUP REMOVED IN V3.0
--- Settings area is intentionally reserved for future features.
-
-function updateFilterStatus()
-    local parts = {}
-
-    local rarityCount = 0
-    for _ in pairs(selectedRarities) do
-        rarityCount += 1
-    end
-    if rarityCount > 0 then
-        table.insert(parts, rarityCount .. " rarity")
-    end
-
-    local nexusCount = 0
-    for _ in pairs(selectedNexus) do
-        nexusCount += 1
-    end
-    if nexusCount > 0 then
-        table.insert(parts, nexusCount .. " Nexus")
-    end
-
-    local categoryCount = 0
-    for _ in pairs(selectedCategories) do
-        categoryCount += 1
-    end
-    if categoryCount > 0 then
-        table.insert(parts, categoryCount .. " cat")
-    end
-
-    if #parts > 0 then
-        filterStatus.Text = table.concat(parts, " | ")
+boosterToggleBtn.MouseButton1Click:Connect(function()
+    boosterOn = not boosterOn
+    if boosterOn then
+        boosterToggleBtn.Text = "BOOST ON"
+        boosterToggleBtn.BackgroundColor3 = C.green
+        enableGameBooster()
     else
-        filterStatus.Text = "Filter: SEMUA"
-    end
-end
-
--- ================================================================
--- REFRESH TOGGLES
--- ================================================================
-
-local function refreshToggles()
-    for name, data in pairs(toggleButtons) do
-        if data.get() then
-            local color = data.color or C.accent
-            data.btn.BackgroundColor3 = color
-        else
-            data.btn.BackgroundColor3 = C.black
-        end
-    end
-end
-
--- ================================================================
--- RESET
--- ================================================================
-
-resetBtn.MouseButton1Click:Connect(function()
-    selectedRarities = {}
-    selectedCategories = {}
-    selectedNexus = {}
-
-    markFilteredDirty()
-    clearAllMarkers()
-    refreshToggles()
-    updateFilterStatus()
-
-    if radarOn then
-        task.defer(scan)
+        boosterToggleBtn.Text = "BOOST OFF"
+        boosterToggleBtn.BackgroundColor3 = C.red
+        disableGameBooster()
     end
 end)
 
--- ================================================================
--- SPEED
--- ================================================================
+local pInfo = Instance.new("TextLabel", settingsPage)
+pInfo.Position = UDim2.new(0, 0, 0, 80)
+pInfo.Size = UDim2.new(1, 0, 0, 40)
+pInfo.Text = "V20.1 Clean\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+"
+pInfo.TextColor3 = C.textSub
+pInfo.TextSize = 8
+pInfo.Font = Enum.Font.Gotham
+pInfo.TextXAlignment = Enum.TextXAlignment.Left
+pInfo.BackgroundTransparency = 1
+pInfo.TextWrapped = true
+
+function updateFilterStatus()
+    local parts = {}
+    local rCount = 0
+    for _ in pairs(selectedRarities) do rCount += 1 end
+    if rCount > 0 then table.insert(parts, rCount .. " rarity") end
+    local nCount = 0
+    for _ in pairs(selectedNexus) do nCount += 1 end
+    if nCount > 0 then table.insert(parts, nCount .. " Nexus") end
+    local cCount = 0
+    for _ in pairs(selectedCategories) do cCount += 1 end
+    if cCount > 0 then table.insert(parts, cCount .. " cat") end
+    filterStatus.Text = #parts > 0 and table.concat(parts, " | ") or "Filter: SEMUA NONAKTIF"
+end
+
+local function refreshToggles()
+    for _, data in pairs(toggleButtons) do
+        data.btn.BackgroundColor3 = data.get() and (data.color or C.accent) or C.black
+    end
+end
+
+resetBtn.MouseButton1Click:Connect(function()
+    table.clear(selectedRarities)
+    table.clear(selectedCategories)
+    table.clear(selectedNexus)
+    clearAllMarkers()
+    refreshToggles()
+    updateFilterStatus()
+    if radarOn then task.defer(scanRealTime) end
+end)
 
 speedBtn.MouseButton1Click:Connect(function()
     speedOn = not speedOn
     setSpeedVis(speedOn)
-
-    if speedOn then
-        hookHumanoid()
-    else
-        local character = localPlayer.Character
-        local hum = character and character:FindFirstChildOfClass("Humanoid")
-
-        if hum then
-            hum.WalkSpeed = CONFIG.normalSpeed
-        end
-    end
+    if speedOn then hookSpeed() else unhookSpeed() end
 end)
-
--- ================================================================
--- RADAR
--- ================================================================
 
 radarBtn.MouseButton1Click:Connect(function()
     setSettingsVis(false)
     radarPage.Visible = true
     settingsPage.Visible = false
-    currentPage = "radar"
     refreshRadarToggle()
 end)
-
--- ================================================================
--- SETTINGS
--- ================================================================
 
 settingsBtn.MouseButton1Click:Connect(function()
     setSettingsVis(true)
     radarPage.Visible = false
     settingsPage.Visible = true
-    currentPage = "settings"
 end)
-
-
--- ================================================================
--- MINI BUBBLE
--- ================================================================
 
 local miniBubble = Instance.new("TextButton", screenGui)
 miniBubble.Size = UDim2.new(0, 48, 0, 48)
 miniBubble.Position = UDim2.new(0, 12, 0.5, -24)
-miniBubble.Text = "⚡"
+miniBubble.Text = "❄"
 miniBubble.TextColor3 = Color3.new(1, 1, 1)
 miniBubble.BackgroundColor3 = C.accent
 miniBubble.Font = Enum.Font.GothamBold
-miniBubble.TextSize = 16
+miniBubble.TextSize = 18
 miniBubble.BorderSizePixel = 0
 miniBubble.Visible = false
-
 Instance.new("UICorner", miniBubble).CornerRadius = UDim.new(1, 0)
-
--- ================================================================
--- MINIMIZE
--- ================================================================
 
 minBtn.MouseButton1Click:Connect(function()
     miniBubble.Position = outer.Position
     outer.Visible = false
     miniBubble.Visible = true
 end)
-
 miniBubble.MouseButton1Click:Connect(function()
     outer.Visible = true
     miniBubble.Visible = false
 end)
 
--- ================================================================
--- DRAG
--- ================================================================
-
 local function makeDraggable(frame)
-    local dragging = false
-    local dragStart
-    local startPos
-
+    local dragging, dragStart, startPos = false, nil, nil
     frame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = frame.Position
         end
     end)
-
     frame.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
-
     frame.InputChanged:Connect(function(input)
-        if not dragging then
-            return
-        end
-
-        if input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch then
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - dragStart
-
-            frame.Position = UDim2.new(
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
-            )
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
 end
@@ -1948,19 +1011,8 @@ end
 makeDraggable(outer)
 makeDraggable(miniBubble)
 
--- ================================================================
--- INITIAL UI
--- ================================================================
-
 updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print(
-    "ENGINE V16 V12.0 MODERN LOADED ✔",
-    "| NO LAG ON RADAR ON",
-    "| ASYNC CACHE + SOFT-START",
-    "| RARITY OFF=HIDE / ON=SHOW",
-    "| MARKER ONLY • 200M • STICKY",
-    "| FILTER-FIRST + DIST²"
-)
+print("❄ GEC MINE ANTARCTICA V20.1 CLEAN LOADED ✔")
