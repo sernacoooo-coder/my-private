@@ -7,12 +7,10 @@ if providedKey == nil and type(_G) == "table" then providedKey = _G.key end
 
 if providedKey ~= EXPECTED_KEY then return end
 
-
-
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V1.00
--- Radar ringan+presisi • Speed 3x (fixed) • Jetpack modern
--- Anti Damage/Jatuh • Anti Slip • Instant Pickup • Ultra FPS
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V2.00 (EXTREME UPGRADE)
+-- Multi-Target Radar (60+ Instant) • Anti-Slip Slope Lock 100%
+-- Speed 3x (Anti-Rubberband) • Anti Damage/Jatuh • Ultra FPS 100%
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -32,25 +30,20 @@ end)
 local CONFIG = {
 	normalSpeed = 16,
 	boostMult = 3,
-	radarIntervalIdle = 0.08,
-	radarIntervalMove = 0.035,
-	moveThresholdSq = 2.2 * 2.2,
-	maxMarkers = 36,
+	radarIntervalIdle = 0.05,
+	radarIntervalMove = 0.02,
+	moveThresholdSq = 1.5 * 1.5,
+	maxMarkers = 64,
 	scanRadius = 210,
 	scanRadiusSq = 210 * 210,
 	dropRadius = 230,
 	dropRadiusSq = 230 * 230,
-	cleanupInterval = 5.5,
+	cleanupInterval = 4.0,
 	lightWeightValue = 0.1,
 	softFallMaxSpeed = -40,
 	voidY = -80,
-	antiFallBoost = 10,
-	-- Jetpack
-	jetForce = 55,
-	jetMaxUp = 80,
-	jetHorizontal = 0.35,
-	-- Anti slip
-	groundFriction = 1.2,
+	antiFallBoost = 12,
+	groundFriction = 50, -- Friksi maksimal anti slip
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -89,14 +82,13 @@ local C = {
 }
 
 local speedOn, radarOn, boosterOn, lightWeightOn = false, false, false, false
-local antiDamageOn, jetpackOn = false, false
-local jetHolding = false
+local antiDamageOn = false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
-local highlightPool = table.create(CONFIG.maxMarkers + 12)
+local highlightPool = table.create(CONFIG.maxMarkers + 20)
 
-for i = 1, CONFIG.maxMarkers + 12 do
+for i = 1, CONFIG.maxMarkers + 20 do
 	local hl = Instance.new("Highlight")
 	hl.Name = "HyperHL"
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -106,7 +98,7 @@ for i = 1, CONFIG.maxMarkers + 12 do
 	highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 48
+local MAX_FOUND_BUFFER = 120
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
 	foundSlots[i] = {part = nil, data = nil, dist = 0}
@@ -361,7 +353,7 @@ task.spawn(function()
 		if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
 			pcall(registerTarget, obj)
 		end
-		if i % 250 == 0 then task.wait() end
+		if i % 300 == 0 then task.wait() end
 	end
 end)
 
@@ -391,6 +383,7 @@ local function passesFilter(data)
 	return true
 end
 
+-- SCAN REAL-TIME SUPER CEPAT (Mampu scan 60+ marker sekaligus tanpa lag)
 local function scanRealTime()
 	if not radarOn or next(selectedRarities) == nil then
 		if next(activeMarkers) then clearAllMarkers() end
@@ -502,14 +495,13 @@ Workspace.DescendantAdded:Connect(function(obj)
 	if obj and obj:IsA("ProximityPrompt") then task.defer(processPrompt, obj) end
 end)
 
--- ========== SPEED 3x FIXED (no rubber-band / no stuck) ==========
+-- ========== SPEED 3x FIXED (Anti-Rubberband) ==========
 local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
 local speedConn, speedHeartbeat = nil, nil
 
 local function applySpeedSafe(hum)
 	if not hum or not speedOn then return end
 	local want = targetSpeed()
-	-- Hanya set jika beda jauh (>0.5) biar nggak conflict physics server
 	if math.abs(hum.WalkSpeed - want) > 0.5 then
 		pcall(function() hum.WalkSpeed = want end)
 	end
@@ -523,16 +515,14 @@ local function hookSpeed()
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if not hum then return end
 
-	-- Saat game reset WalkSpeed, kita set balik (event-driven, bukan spam tiap frame)
 	speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
 		if not speedOn then return end
 		local now = tick()
-		if now - lastSpeedApply < 0.08 then return end -- debounce
+		if now - lastSpeedApply < 0.08 then return end
 		lastSpeedApply = now
 		applySpeedSafe(hum)
 	end)
 
-	-- Fallback ringan tiap 0.15s (bukan RenderStepped) — cegah stuck + rubber band
 	speedHeartbeat = RunService.Heartbeat:Connect(function()
 		if not speedOn then return end
 		local now = tick()
@@ -555,7 +545,7 @@ local function unhookSpeed()
 	if hum then pcall(function() hum.WalkSpeed = CONFIG.normalSpeed end) end
 end
 
--- ========== ANTI DAMAGE + ANTI JATUH + ANTI SLIP ==========
+-- ========== ANTI DAMAGE + ANTI JATUH + ANTI TERGELINCIR 100% FIXED ==========
 local antiConn = {}
 local lastSafeCFrame = nil
 local lastHealth = 100
@@ -565,18 +555,22 @@ local function clearAntiConns()
 	table.clear(antiConn)
 end
 
-local function applyAntiSlip(hrp, hum)
-	if not hrp then return end
-	pcall(function()
-		-- Friction tinggi biar nggak tergelincir di tebing/es
-		hrp.CustomPhysicalProperties = PhysicalProperties.new(
-			0.7,  -- density
-			CONFIG.groundFriction, -- friction (tinggi = anti slip)
-			0.2,  -- elasticity
-			1,    -- friction weight
-			1     -- elasticity weight
-		)
-	end)
+-- Terapkan friksi super kuat ke SELURUH part karakter
+local function applyAntiSlipFull(char, hum)
+	if not char then return end
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			pcall(function()
+				part.CustomPhysicalProperties = PhysicalProperties.new(
+					1.5,                    -- Density
+					CONFIG.groundFriction,  -- Friction (Tinggi = 0 gelincir di es)
+					0,                      -- Elasticity
+					100,                    -- FrictionWeight (Override terrain)
+					100                     -- ElasticityWeight
+				)
+			end)
+		end
+	end
 	if hum then
 		pcall(function()
 			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
@@ -595,7 +589,7 @@ local function hookAntiDamage(char)
 	lastHealth = hum.Health
 	if hrp then
 		lastSafeCFrame = hrp.CFrame
-		applyAntiSlip(hrp, hum)
+		applyAntiSlipFull(char, hum)
 	end
 
 	table.insert(antiConn, hum.HealthChanged:Connect(function(h)
@@ -617,6 +611,7 @@ local function hookAntiDamage(char)
 		end
 	end))
 
+	-- Physics Controller: Slope Locking & Soft Landing
 	table.insert(antiConn, RunService.Heartbeat:Connect(function()
 		if not antiDamageOn then return end
 		local c = localPlayer.Character
@@ -628,19 +623,30 @@ local function hookAntiDamage(char)
 		local state = h:GetState()
 		local pos = root.Position
 		local vel = root.AssemblyLinearVelocity
+		local moveDir = h.MoveDirection
 
+		-- SLOPE LOCK ANTI GELINCIR: Jika player diam di tebing es, hilangkan velositas merosot
 		if state == Enum.HumanoidStateType.Running
 			or state == Enum.HumanoidStateType.Landed
 			or state == Enum.HumanoidStateType.Climbing then
+			
 			if vel.Y > -5 then lastSafeCFrame = root.CFrame end
-			-- Anti slip: redam velocity horizontal berlebih saat di tanah miring
-			local horiz = Vector3.new(vel.X, 0, vel.Z)
-			if horiz.Magnitude > targetSpeed() * 1.35 and not jetHolding then
-				local capped = horiz.Unit * (CONFIG.normalSpeed * CONFIG.boostMult * 1.1)
-				root.AssemblyLinearVelocity = Vector3.new(capped.X, vel.Y, capped.Z)
+			
+			if moveDir.Magnitude < 0.05 then
+				-- Nol-kan kecepatan geser horizontal saat berhenti
+				root.AssemblyLinearVelocity = Vector3.new(0, math.clamp(vel.Y, -5, 5), 0)
+			else
+				-- Jika sedang lari, kunci agar tidak tergelincir berlebih
+				local horiz = Vector3.new(vel.X, 0, vel.Z)
+				local maxSpd = (speedOn and targetSpeed() or CONFIG.normalSpeed) * 1.15
+				if horiz.Magnitude > maxSpd then
+					local capped = horiz.Unit * maxSpd
+					root.AssemblyLinearVelocity = Vector3.new(capped.X, vel.Y, capped.Z)
+				end
 			end
 		end
 
+		-- Anti Damage Jatuh
 		if state == Enum.HumanoidStateType.Freefall then
 			if vel.Y < CONFIG.softFallMaxSpeed then
 				root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.softFallMaxSpeed, vel.Z)
@@ -648,12 +654,13 @@ local function hookAntiDamage(char)
 			if vel.Y < -18 then
 				root.AssemblyLinearVelocity = Vector3.new(
 					vel.X,
-					math.max(vel.Y + CONFIG.antiFallBoost * 0.12, CONFIG.softFallMaxSpeed),
+					math.max(vel.Y + CONFIG.antiFallBoost * 0.15, CONFIG.softFallMaxSpeed),
 					vel.Z
 				)
 			end
 		end
 
+		-- Teleport balik jika jatuh ke void
 		if pos.Y < CONFIG.voidY and lastSafeCFrame then
 			pcall(function()
 				root.CFrame = lastSafeCFrame + Vector3.new(0, 3, 0)
@@ -673,157 +680,20 @@ end
 local function disableAntiDamage()
 	antiDamageOn = false
 	clearAntiConns()
-	-- restore default physics
 	local char = localPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if hrp then pcall(function() hrp.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.3, 0.5) end) end
-end
-
--- ========== JETPACK V1.00 (SIMPLE — PASTI AKTIF) ==========
--- Method: AssemblyLinearVelocity langsung, zero constraint, zero asset dependency
-local jetStepConn = nil
-local jetFxPart = nil
-
-local function clearJetFx()
-	if jetFxPart then pcall(function() jetFxPart:Destroy() end) jetFxPart = nil end
-end
-
-local function ensureJetFx(root)
-	if jetFxPart and jetFxPart.Parent then return end
-	clearJetFx()
-	local p = Instance.new("Part")
-	p.Name = "JetFx"
-	p.Size = Vector3.new(0.2, 0.2, 0.2)
-	p.Transparency = 1
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.Massless = true
-	p.Anchored = false
-	p.CFrame = root.CFrame * CFrame.new(0, -1.2, 0.3)
-	p.Parent = root
-
-	local w = Instance.new("WeldConstraint")
-	w.Part0 = root
-	w.Part1 = p
-	w.Parent = p
-
-	local att = Instance.new("Attachment")
-	att.Parent = p
-
-	local pe = Instance.new("ParticleEmitter")
-	pe.Name = "Flame"
-	pe.Texture = "rbxasset://textures/particles/smoke_main.dds"
-	pe.Color = ColorSequence.new(Color3.fromRGB(90, 190, 255), Color3.fromRGB(200, 240, 255))
-	pe.Size = NumberSequence.new(0.5, 0.05)
-	pe.Transparency = NumberSequence.new(0.2, 1)
-	pe.Lifetime = 0
-	pe.Rate = 0
-	pe.Speed = NumberRange.new(12, 18)
-	pe.LifetimeDirection = NumberRange.new(170, 190)
-	pe.LifetimeSpreadAngle = Vector2.new(15, 15)
-	pe.Lifetime = NumberRange.new(0.2, 0.35)
-	pe.LightEmission = 0.8
-	pe.Enabled = false
-	pe.Parent = att
-
-	jetFxPart = p
-end
-
-local function setJetActive(on)
-	jetHolding = (on == true) and (jetpackOn == true)
-	if jetFxPart then
-		local pe = jetFxPart:FindFirstChildWhichIsA("ParticleEmitter", true)
-		if pe then
-			pe.Enabled = jetHolding
-			pe.Rate = jetHolding and 55 or 0
-		end
-	end
-end
-
-local function enableJetpack()
-	jetpackOn = true
-	jetHolding = false
-
-	if jetStepConn then jetStepConn:Disconnect() jetStepConn = nil end
-
-	jetStepConn = RunService.Heartbeat:Connect(function(dt)
-		if not jetpackOn then return end
-
-		local c = localPlayer.Character
-		if not c then return end
-		local root = c:FindFirstChild("HumanoidRootPart")
-		local hum = c:FindFirstChildOfClass("Humanoid")
-		if not root then return end
-
-		-- pastikan FX nempel
-		ensureJetFx(root)
-
-		if not jetHolding then return end
-
-		local cur = root.AssemblyLinearVelocity
-		local look = root.CFrame.LookVector
-		local moveDir = hum and hum.MoveDirection or Vector3.zero
-
-		-- BOOST NAIK (inti jetpack)
-		local upPower = 62
-		local maxUp = 85
-		local newY = math.clamp(cur.Y + upPower * dt * 5, -25, maxUp)
-
-		local hx, hz = cur.X, cur.Z
-		if moveDir.Magnitude > 0.08 then
-			local spd = 48 -- selaras speed 3x
-			hx = moveDir.X * spd
-			hz = moveDir.Z * spd
-		else
-			hx = cur.X * 0.97 + look.X * 8 * dt
-			hz = cur.Z * 0.97 + look.Z * 8 * dt
-		end
-
-		root.AssemblyLinearVelocity = Vector3.new(hx, newY, hz)
-
-		if hum then
-			local st = hum:GetState()
-			if st ~= Enum.HumanoidStateType.Freefall and st ~= Enum.HumanoidStateType.Jumping then
-				pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end)
+	if char then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then
+				pcall(function() part.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.3, 0.5) end)
 			end
 		end
-	end)
-
-	-- setup fx sekarang kalau char ada
-	local c = localPlayer.Character
-	local root = c and c:FindFirstChild("HumanoidRootPart")
-	if root then ensureJetFx(root) end
-end
-
-local function disableJetpack()
-	jetpackOn = false
-	jetHolding = false
-	setJetActive(false)
-	if jetStepConn then jetStepConn:Disconnect() jetStepConn = nil end
-	clearJetFx()
-end
-
--- Input PC
-UserInputService.InputBegan:Connect(function(input, gp)
-	if gp or not jetpackOn then return end
-	if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.LeftControl then
-		setJetActive(true)
 	end
-end)
-UserInputService.InputEnded:Connect(function(input)
-	if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.LeftControl then
-		setJetActive(false)
-	end
-end)
-
--- Mobile touch: jet button dibuat di GUI settings area (lihat bawah)
+end
 
 localPlayer.CharacterAdded:Connect(function(char)
 	task.wait(0.4)
 	if speedOn then hookSpeed() end
 	if antiDamageOn then hookAntiDamage(char) end
-	if jetpackOn then local r = char:FindFirstChild("HumanoidRootPart") if r then ensureJetFx(r) end end
 end)
 
 RunService.Heartbeat:Connect(function()
@@ -857,7 +727,7 @@ RunService.Heartbeat:Connect(function()
 	end
 end)
 
--- Ultra FPS
+-- ========== ULTRA FPS 100% EXTREME BOOSTER ==========
 local boosterBackup = { effects = {}, savedSettings = {} }
 local boosterEvent = nil
 
@@ -869,20 +739,23 @@ local function enableGameBooster()
 		Lighting.GlobalShadows = false
 		Lighting.FogEnd = 9e9
 		Lighting.FogStart = 0
-		Lighting.Brightness = 1.25
+		Lighting.Brightness = 1.5
 		Lighting.EnvironmentDiffuseScale = 0
 		Lighting.EnvironmentSpecularScale = 0
-		Lighting.Ambient = Color3.fromRGB(50, 50, 50)
-		Lighting.OutdoorAmbient = Color3.fromRGB(50, 50, 50)
+		Lighting.Ambient = Color3.fromRGB(80, 80, 80)
+		Lighting.OutdoorAmbient = Color3.fromRGB(80, 80, 80)
 	end)
+	
 	table.clear(boosterBackup.effects)
 	for _, effect in ipairs(Lighting:GetChildren()) do
 		if effect:IsA("PostProcessEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
-			or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
+			or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect")
+			or effect:IsA("Atmosphere") or effect:IsA("Clouds") or effect:IsA("Sky") then
 			boosterBackup.effects[effect] = effect.Enabled
 			pcall(function() effect.Enabled = false end)
 		end
 	end
+	
 	local terrain = Workspace:FindFirstChildOfClass("Terrain")
 	if terrain then
 		boosterBackup.terrainDecoration = terrain.Decoration
@@ -893,8 +766,10 @@ local function enableGameBooster()
 			terrain.WaterWaveSize = 0
 			terrain.WaterWaveSpeed = 0
 			terrain.WaterReflectance = 0
+			terrain.WaterTransparency = 0
 		end)
 	end
+	
 	pcall(function()
 		if UserGameSettings then
 			boosterBackup.savedSettings.SavedQualityLevel = UserGameSettings.SavedQualityLevel
@@ -902,28 +777,33 @@ local function enableGameBooster()
 		end
 		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 	end)
-	if boosterEvent then boosterEvent:Disconnect() boosterEvent = nil end
-	boosterEvent = Workspace.DescendantAdded:Connect(function(obj)
+
+	local function stripLag(obj)
 		if not boosterOn or not obj then return end
 		if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
 			or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
 			pcall(function() obj.Enabled = false end)
+		elseif obj:IsA("Decal") or obj:IsA("Texture") then
+			pcall(function() obj.Transparency = 1 end)
 		elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-			pcall(function() obj.CastShadow = false end)
+			pcall(function()
+				obj.CastShadow = false
+				obj.Material = Enum.Material.SmoothPlastic
+				obj.Reflectance = 0
+			end)
 		end
-	end)
+	end
+
+	if boosterEvent then boosterEvent:Disconnect() boosterEvent = nil end
+	boosterEvent = Workspace.DescendantAdded:Connect(stripLag)
+	
 	task.spawn(function()
 		local ok, desc = pcall(function() return Workspace:GetDescendants() end)
 		if not ok or not desc then return end
 		local count = 0
 		for _, obj in ipairs(desc) do
 			if not boosterOn then break end
-			if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-				or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
-				pcall(function() obj.Enabled = false end)
-			elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-				pcall(function() obj.CastShadow = false end)
-			end
+			stripLag(obj)
 			count += 1
 			if count % 350 == 0 then task.wait() end
 		end
@@ -957,7 +837,7 @@ local function disableGameBooster()
 	end)
 end
 
--- GUI
+-- ========== GUI MODERN & LIGHTWEIGHT ==========
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -994,7 +874,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V1.00"
+titleLabel.Text = "❄ Gec Mine Antarctica • V2.00 Ultra"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -1101,7 +981,7 @@ radarToggleBtn.MouseButton1Click:Connect(function()
 	setRadarVis(radarOn)
 	refreshRadarToggle()
 	if radarOn then
-		radarStatus.Text = "ANTARCTICA • 210M • 36 MARKERS • ON"
+		radarStatus.Text = "ANTARCTICA • 210M • 64 MARKERS • ON"
 		lastScanClock = 0
 		task.defer(function() pcall(scanRealTime) end)
 	else
@@ -1217,7 +1097,7 @@ pTitle.BackgroundTransparency = 1
 
 local function makeSettingCard(parent, y, title, subtitle)
 	local card = Instance.new("Frame", parent)
-	card.Size = UDim2.new(1, 0, 0, 42)
+	card.Size = UDim2.new(1, 0, 0, 44)
 	card.Position = UDim2.new(0, 0, 0, y)
 	card.BackgroundColor3 = C.black
 	card.BackgroundTransparency = 0.2
@@ -1246,7 +1126,7 @@ local function makeSettingCard(parent, y, title, subtitle)
 	return btn
 end
 
-local boosterToggleBtn = makeSettingCard(settingsPage, 18, "⚡ ULTRA FPS 80+", "Graphics Optimized")
+local boosterToggleBtn = makeSettingCard(settingsPage, 18, "⚡ ULTRA FPS 100%", "Full Potato Mode • Anti Lag")
 boosterToggleBtn.Text = "BOOST OFF"
 boosterToggleBtn.MouseButton1Click:Connect(function()
 	boosterOn = not boosterOn
@@ -1261,7 +1141,7 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local weightToggleBtn = makeSettingCard(settingsPage, 64, "🪶 BERAT RINGAN", "CrystalWeight → 0.1")
+local weightToggleBtn = makeSettingCard(settingsPage, 68, "🪶 BERAT RINGAN", "CrystalWeight → 0.1")
 weightToggleBtn.Text = "LIGHT OFF"
 weightToggleBtn.MouseButton1Click:Connect(function()
 	lightWeightOn = not lightWeightOn
@@ -1277,7 +1157,7 @@ weightToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local antiToggleBtn = makeSettingCard(settingsPage, 110, "🛡 ANTI DMG + ANTI SLIP", "Tebing aman • No gelincir")
+local antiToggleBtn = makeSettingCard(settingsPage, 118, "🛡 ANTI DAMAGE & SLIP", "Full Slope Lock • Tebing Es Aman")
 antiToggleBtn.Text = "ANTI OFF"
 antiToggleBtn.MouseButton1Click:Connect(function()
 	if antiDamageOn then
@@ -1291,145 +1171,16 @@ antiToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local jetToggleBtn = makeSettingCard(settingsPage, 156, "🚀 JETPACK (HP)", "Tombol besar di layar • tahan")
-jetToggleBtn.Text = "JET OFF"
-
 local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 206)
+pInfo.Position = UDim2.new(0, 0, 0, 175)
 pInfo.Size = UDim2.new(1, 0, 0, 50)
-pInfo.Text = "V1.00 Jetpack Fix\nSpeed 3x fixed • Jetpack AssemblyLinearVelocity 100% • Anti slip\nRadar ringan • Instant Pickup • Ultra FPS"
+pInfo.Text = "V2.00 Extreme Edition\nSpeed 3x • Radar Multi-Target 60+ Presisi • Anti-Slip 100%\nInstant Pickup • Ultra FPS Potato 100%"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
 pInfo.TextXAlignment = Enum.TextXAlignment.Left
 pInfo.BackgroundTransparency = 1
 pInfo.TextWrapped = true
-
--- ========== JETPACK MOBILE PERFECT (utama untuk HP) ==========
-local jetMobileBtn = Instance.new("TextButton", screenGui)
-jetMobileBtn.Name = "JetMobileBtn"
-jetMobileBtn.Size = UDim2.new(0, 88, 0, 88)
-jetMobileBtn.Position = UDim2.new(1, -108, 1, -130)
-jetMobileBtn.AnchorPoint = Vector2.new(0, 0)
-jetMobileBtn.Text = "🚀\nJET"
-jetMobileBtn.TextSize = 22
-jetMobileBtn.Font = Enum.Font.GothamBold
-jetMobileBtn.TextColor3 = Color3.new(1, 1, 1)
-jetMobileBtn.BackgroundColor3 = Color3.fromRGB(30, 100, 200)
-jetMobileBtn.BackgroundTransparency = 0.15
-jetMobileBtn.BorderSizePixel = 0
-jetMobileBtn.Visible = false
-jetMobileBtn.ZIndex = 100
-jetMobileBtn.Active = true
-jetMobileBtn.AutoButtonColor = false
-Instance.new("UICorner", jetMobileBtn).CornerRadius = UDim.new(1, 0)
-local jetStroke = Instance.new("UIStroke", jetMobileBtn)
-jetStroke.Color = Color3.fromRGB(100, 200, 255)
-jetStroke.Thickness = 2.5
-jetStroke.Transparency = 0.2
-
--- Label status di bawah tombol
-local jetHint = Instance.new("TextLabel", screenGui)
-jetHint.Size = UDim2.new(0, 100, 0, 18)
-jetHint.Position = UDim2.new(1, -114, 1, -40)
-jetHint.BackgroundTransparency = 1
-jetHint.Text = "tahan untuk terbang"
-jetHint.TextColor3 = Color3.fromRGB(180, 220, 255)
-jetHint.TextSize = 10
-jetHint.Font = Enum.Font.Gotham
-jetHint.Visible = false
-jetHint.ZIndex = 100
-
-local jetTouchActive = false
-local jetTouchId = nil
-
-local function jetVisual(on)
-	if on then
-		jetMobileBtn.BackgroundColor3 = Color3.fromRGB(40, 200, 120)
-		jetMobileBtn.Text = "🚀\nON"
-		jetStroke.Color = Color3.fromRGB(80, 255, 160)
-		jetHint.Text = "terbang..."
-	else
-		jetMobileBtn.BackgroundColor3 = Color3.fromRGB(30, 100, 200)
-		jetMobileBtn.Text = "🚀\nJET"
-		jetStroke.Color = Color3.fromRGB(100, 200, 255)
-		jetHint.Text = "tahan untuk terbang"
-	end
-end
-
-local function refreshJetMobile()
-	-- Selalu tampil saat JET ON (prioritas HP; PC tetap bisa pakai SPACE)
-	local show = jetpackOn == true
-	jetMobileBtn.Visible = show
-	jetHint.Visible = show
-	if not show then
-		jetTouchActive = false
-		jetTouchId = nil
-		setJetActive(false)
-		jetVisual(false)
-	end
-end
-
--- Touch / mouse press on jet button (HP sempurna)
-jetMobileBtn.InputBegan:Connect(function(input)
-	if not jetpackOn then return end
-	if input.UserInputType == Enum.UserInputType.Touch
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		jetTouchActive = true
-		jetTouchId = input
-		setJetActive(true)
-		jetVisual(true)
-	end
-end)
-
-jetMobileBtn.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.Touch
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		jetTouchActive = false
-		jetTouchId = nil
-		setJetActive(false)
-		jetVisual(false)
-	end
-end)
-
--- Global touch end (kalau jari geser keluar tombol, tetap lepas = mati)
-UserInputService.InputEnded:Connect(function(input)
-	if not jetTouchActive then return end
-	if input.UserInputType == Enum.UserInputType.Touch
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		jetTouchActive = false
-		jetTouchId = nil
-		setJetActive(false)
-		jetVisual(false)
-	end
-end)
-
--- Prevent accidental camera drag while holding jet on mobile
-jetMobileBtn.MouseButton1Down:Connect(function()
-	if jetpackOn then
-		jetTouchActive = true
-		setJetActive(true)
-		jetVisual(true)
-	end
-end)
-jetMobileBtn.MouseButton1Up:Connect(function()
-	jetTouchActive = false
-	setJetActive(false)
-	jetVisual(false)
-end)
-
-jetToggleBtn.MouseButton1Click:Connect(function()
-	if jetpackOn then
-		disableJetpack()
-		jetToggleBtn.Text = "JET OFF"
-		jetToggleBtn.BackgroundColor3 = C.red
-	else
-		enableJetpack()
-		jetToggleBtn.Text = "JET ON"
-		jetToggleBtn.BackgroundColor3 = C.green
-	end
-	refreshJetMobile()
-end)
 
 function updateFilterStatus()
 	local parts = {}
@@ -1479,8 +1230,6 @@ settingsBtn.MouseButton1Click:Connect(function()
 	radarPage.Visible = false
 	settingsPage.Visible = true
 end)
-
--- mobile jet visibility synced on enable/disable via jetToggle above
 
 local miniBubble = Instance.new("TextButton", screenGui)
 miniBubble.Size = UDim2.new(0, 48, 0, 48)
@@ -1539,4 +1288,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V1.00 LOADED ✔ | Jetpack SIMPLE 100%")
+print("❄ GEC MINE ANTARCTICA V2.00 LOADED ✔ | Anti-Slip & Multi-Radar Fixed 100%")
