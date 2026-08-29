@@ -679,15 +679,17 @@ local function disableAntiDamage()
 	if hrp then pcall(function() hrp.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.3, 0.5) end) end
 end
 
--- ========== JETPACK MODERN (proporsional, hold Space / mobile button) ==========
-local jetAttachment, jetForceObj, jetGyro = nil, nil, nil
-local jetParticles = nil
+-- ========== JETPACK 2026 (AssemblyLinearVelocity — method paling stabil client) ==========
+-- Referensi Roblox 2024-2026: set AssemblyLinearVelocity tiap frame saat hold
+local jetAttachment, jetParticles = nil, nil
+local jetStepConn = nil
 
 local function destroyJetpackParts()
-	if jetForceObj then pcall(function() jetForceObj:Destroy() end) jetForceObj = nil end
-	if jetGyro then pcall(function() jetGyro:Destroy() end) jetGyro = nil end
-	if jetAttachment then pcall(function() jetAttachment:Destroy() end) jetAttachment = nil end
 	if jetParticles then pcall(function() jetParticles:Destroy() end) jetParticles = nil end
+	if jetAttachment and jetAttachment.Name == "JetAttach" then
+		pcall(function() jetAttachment:Destroy() end)
+	end
+	jetAttachment = nil
 end
 
 local function setupJetpack(char)
@@ -696,33 +698,13 @@ local function setupJetpack(char)
 	local hrp = char:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
 
-	jetAttachment = Instance.new("Attachment")
-	jetAttachment.Name = "JetAttach"
-	jetAttachment.Parent = hrp
+	jetAttachment = hrp:FindFirstChild("RootAttachment")
+	if not jetAttachment then
+		jetAttachment = Instance.new("Attachment")
+		jetAttachment.Name = "JetAttach"
+		jetAttachment.Parent = hrp
+	end
 
-	-- LinearVelocity modern (lebih stabil dari BodyVelocity)
-	local lv = Instance.new("LinearVelocity")
-	lv.Name = "JetVelocity"
-	lv.Attachment0 = jetAttachment
-	lv.MaxForce = 12000
-	lv.VectorVelocity = Vector3.zero
-	lv.RelativeTo = Enum.ActuatorRelativeTo.World
-	lv.Enabled = false
-	lv.Parent = hrp
-	jetForceObj = lv
-
-	-- Align biar tegak stabil
-	local ag = Instance.new("AlignOrientation")
-	ag.Name = "JetAlign"
-	ag.Mode = Enum.OrientationAlignmentMode.OneAttachment
-	ag.Attachment0 = jetAttachment
-	ag.MaxTorque = 5000
-	ag.Responsiveness = 12
-	ag.Enabled = false
-	ag.Parent = hrp
-	jetGyro = ag
-
-	-- Particle trail sederhana (proporsional modern)
 	local pe = Instance.new("ParticleEmitter")
 	pe.Name = "JetFlame"
 	pe.Texture = "rbxasset://textures/particles/smoke_main.dds"
@@ -732,76 +714,80 @@ local function setupJetpack(char)
 		ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 230, 255)),
 	})
 	pe.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.4),
+		NumberSequenceKeypoint.new(0, 0.45),
 		NumberSequenceKeypoint.new(1, 0.05),
 	})
 	pe.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.3),
+		NumberSequenceKeypoint.new(0, 0.25),
 		NumberSequenceKeypoint.new(1, 1),
 	})
 	pe.Lifetime = 0
-	pe.Rate = 40
-	pe.Speed = NumberRange.new(8, 14)
+	pe.Rate = 0
+	pe.Speed = NumberRange.new(10, 16)
 	pe.LifetimeDirection = NumberRange.new(160, 200)
-	pe.LifetimeSpreadAngle = Vector2.new(12, 12)
-	pe.Lifetime = NumberRange.new(0.25, 0.4)
-	pe.LightEmission = 0.6
+	pe.LifetimeSpreadAngle = Vector2.new(14, 14)
+	pe.Lifetime = NumberRange.new(0.2, 0.4)
+	pe.LightEmission = 0.7
+	pe.Enabled = false
 	pe.Parent = jetAttachment
 	jetParticles = pe
 end
 
 local function setJetActive(on)
-	jetHolding = on and jetpackOn
-	if jetForceObj then
-		jetForceObj.Enabled = jetHolding
-		if not jetHolding then
-			jetForceObj.VectorVelocity = Vector3.zero
-		end
-	end
-	if jetGyro then jetGyro.Enabled = jetHolding end
+	jetHolding = (on == true) and (jetpackOn == true)
 	if jetParticles then
 		jetParticles.Enabled = jetHolding
-		jetParticles.Rate = jetHolding and 45 or 0
+		jetParticles.Rate = jetHolding and 50 or 0
 	end
 end
 
-local jetStepConn = nil
 local function enableJetpack()
 	jetpackOn = true
 	local char = localPlayer.Character
-	if char then setupJetpack(char) end
-	if jetStepConn then jetStepConn:Disconnect() end
-	-- refreshJetMobile dipanggil dari toggle GUI (setelah defined)
+	if char then
+		setupJetpack(char)
+	else
+		task.spawn(function()
+			local c = localPlayer.Character or localPlayer.CharacterAdded:Wait()
+			if jetpackOn then setupJetpack(c) end
+		end)
+	end
+
+	if jetStepConn then jetStepConn:Disconnect() jetStepConn = nil end
+
 	jetStepConn = RunService.Heartbeat:Connect(function(dt)
 		if not jetpackOn or not jetHolding then return end
 		local c = localPlayer.Character
-		local root = c and c:FindFirstChild("HumanoidRootPart")
-		local hum = c and c:FindFirstChildOfClass("Humanoid")
-		if not root or not jetForceObj then return end
+		if not c then return end
+		local root = c:FindFirstChild("HumanoidRootPart")
+		local hum = c:FindFirstChildOfClass("Humanoid")
+		if not root then return end
 
-		local look = root.CFrame.LookVector
-		local up = Vector3.new(0, 1, 0)
-		-- Proporsional: naik + sedikit maju sesuai arah hadap (modern feel)
-		local move = up * CONFIG.jetForce + look * (CONFIG.jetForce * CONFIG.jetHorizontal)
 		local cur = root.AssemblyLinearVelocity
-		local targetY = math.min(cur.Y + CONFIG.jetForce * dt * 3.5, CONFIG.jetMaxUp)
-		local target = Vector3.new(
-			cur.X * 0.92 + move.X * 0.15,
-			targetY,
-			cur.Z * 0.92 + move.Z * 0.15
-		)
-		jetForceObj.VectorVelocity = target
-		jetForceObj.Enabled = true
+		local look = root.CFrame.LookVector
+		local moveDir = Vector3.zero
+		if hum then moveDir = hum.MoveDirection end
 
-		if jetGyro and jetAttachment then
-			-- tegak, sedikit condong maju
-			local cf = CFrame.lookAt(root.Position, root.Position + Vector3.new(look.X, 0, look.Z))
-			jetGyro.CFrame = cf
+		local boostY = CONFIG.jetForce * 1.15
+		local targetY = math.clamp(cur.Y + boostY * dt * 4, -20, CONFIG.jetMaxUp)
+
+		local hx, hz = cur.X, cur.Z
+		if moveDir.Magnitude > 0.05 then
+			hx = moveDir.X * (CONFIG.normalSpeed * CONFIG.boostMult * 0.95)
+			hz = moveDir.Z * (CONFIG.normalSpeed * CONFIG.boostMult * 0.95)
+		else
+			hx = cur.X * 0.98 + look.X * (CONFIG.jetForce * CONFIG.jetHorizontal * 0.08)
+			hz = cur.Z * 0.98 + look.Z * (CONFIG.jetForce * CONFIG.jetHorizontal * 0.08)
 		end
+
+		pcall(function()
+			root.AssemblyLinearVelocity = Vector3.new(hx, targetY, hz)
+		end)
+
 		if hum then
 			pcall(function()
-				if hum:GetState() ~= Enum.HumanoidStateType.Freefall
-					and hum:GetState() ~= Enum.HumanoidStateType.Jumping then
+				local st = hum:GetState()
+				if st ~= Enum.HumanoidStateType.Freefall and st ~= Enum.HumanoidStateType.Jumping then
 					hum:ChangeState(Enum.HumanoidStateType.Freefall)
 				end
 			end)
@@ -817,7 +803,7 @@ local function disableJetpack()
 	destroyJetpackParts()
 end
 
--- Input Jetpack: Space (hold) / E toggle boost singkat
+-- Input PC: Space / Left Ctrl hold
 UserInputService.InputBegan:Connect(function(input, gp)
 	if gp then return end
 	if not jetpackOn then return end
@@ -1008,7 +994,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V20.6.1"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.6.2"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -1311,7 +1297,7 @@ jetToggleBtn.Text = "JET OFF"
 local pInfo = Instance.new("TextLabel", settingsPage)
 pInfo.Position = UDim2.new(0, 0, 0, 206)
 pInfo.Size = UDim2.new(1, 0, 0, 50)
-pInfo.Text = "V20.6.1 Mobile Jet\nSpeed 3x fixed • Jetpack HP sempurna • Anti slip\nRadar ringan • Instant Pickup • Ultra FPS"
+pInfo.Text = "V20.6.2 Jetpack Fix\nSpeed 3x fixed • Jetpack AssemblyLinearVelocity 100% • Anti slip\nRadar ringan • Instant Pickup • Ultra FPS"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1553,4 +1539,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V20.6.1 LOADED ✔ | Jetpack HP sempurna • hold tombol 🚀")
+print("❄ GEC MINE ANTARCTICA V20.6.2 LOADED ✔ | Jetpack AssemblyLinearVelocity 100%")
