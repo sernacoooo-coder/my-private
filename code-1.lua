@@ -10,8 +10,9 @@ if providedKey ~= EXPECTED_KEY then return end
 
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN (FIXED)
 -- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
+-- Fixed lag | Value/BaseValue filter 100% | Berat ringan 100%
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -39,6 +40,7 @@ local CONFIG = {
     dropRadius = 225,
     dropRadiusSq = 225 * 225,
     cleanupInterval = 4.5,
+    lightWeightValue = 0.1, -- berat ringan 100%
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -76,7 +78,7 @@ local C = {
     textSub = Color3.fromRGB(130, 136, 148),
 }
 
-local speedOn, radarOn, boosterOn = false, false, false
+local speedOn, radarOn, boosterOn, lightWeightOn = false, false, false, false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
@@ -161,6 +163,26 @@ local function readStringAttribute(obj, key)
     return nil
 end
 
+-- Baca Value / BaseValue (Attribute ATAU child NumberValue/IntValue/StringValue) 100%
+local function readValueOrBaseValue(obj)
+    if not obj then return nil end
+    -- Attribute dulu
+    local ok, attr = pcall(function() return obj:GetAttribute("Value") end)
+    if ok and attr ~= nil then return attr end
+    ok, attr = pcall(function() return obj:GetAttribute("BaseValue") end)
+    if ok and attr ~= nil then return attr end
+    -- Child Value / BaseValue
+    local v = obj:FindFirstChild("Value")
+    if v and (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue")) then
+        return v.Value
+    end
+    local bv = obj:FindFirstChild("BaseValue")
+    if bv and (bv:IsA("NumberValue") or bv:IsA("IntValue") or bv:IsA("StringValue")) then
+        return bv.Value
+    end
+    return nil
+end
+
 local function getObjectName(obj)
     if not obj then return "" end
     for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName"}) do
@@ -196,7 +218,8 @@ local function isCrystalTarget(obj)
             return true
         end
         if current:GetAttribute("Rarity") or current:GetAttribute("TierName")
-            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health") then
+            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health")
+            or readValueOrBaseValue(current) ~= nil then
             return true
         end
         current = current.Parent
@@ -218,6 +241,11 @@ local function getRarityName(part)
             current:GetAttribute("Rarity"), current:GetAttribute("TierName"),
             current:GetAttribute("Tier"), current:GetAttribute("RarityName"), getObjectName(current),
         }
+        -- Value / BaseValue support 100%
+        local vb = readValueOrBaseValue(current)
+        if vb ~= nil then
+            table.insert(values, vb)
+        end
         for _, rawValue in ipairs(values) do
             local normalized = normalizeName(tostring(rawValue or ""))
             if normalized ~= "" then
@@ -274,6 +302,25 @@ local function getWorldPart(obj)
     return nil
 end
 
+-- Set berat ringan 100%
+local function applyLightWeight(obj)
+    if not obj or not lightWeightOn then return end
+    pcall(function()
+        local current, depth = obj, 0
+        while current and current ~= Workspace and depth < 7 do
+            if current:GetAttribute("CrystalWeight") ~= nil then
+                current:SetAttribute("CrystalWeight", CONFIG.lightWeightValue)
+            end
+            local w = current:FindFirstChild("CrystalWeight") or current:FindFirstChild("Weight")
+            if w and (w:IsA("NumberValue") or w:IsA("IntValue")) then
+                w.Value = CONFIG.lightWeightValue
+            end
+            current = current.Parent
+            depth += 1
+        end
+    end)
+end
+
 local function registerTarget(obj)
     if not obj or isForbiddenObject(obj) then return end
     local part = getWorldPart(obj)
@@ -285,6 +332,7 @@ local function registerTarget(obj)
         local data = {part = part, nexus = nexus, crystal = crystal, rarity = rarity, category = nil, color = resolveColor(part, nexus, rarity)}
         targetRegistry[part] = data
         table.insert(targetList, data)
+        if lightWeightOn then applyLightWeight(obj) end
     end
 end
 
@@ -314,7 +362,10 @@ end)
 
 Workspace.DescendantAdded:Connect(function(obj)
     if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
-        task.defer(function() pcall(registerTarget, obj) end)
+        task.defer(function()
+            pcall(registerTarget, obj)
+            if lightWeightOn then applyLightWeight(obj) end
+        end)
     end
 end)
 
@@ -413,18 +464,41 @@ local function scanRealTime()
     end
 end
 
--- Instant Pickup
+-- Instant Pickup (FIXED LAG: no full GetDescendants loop every few sec)
+local processedPrompts = {}
+local function processPrompt(obj)
+    if not obj or not obj:IsA("ProximityPrompt") or processedPrompts[obj] then return end
+    processedPrompts[obj] = true
+    pcall(function()
+        if obj.HoldDuration and obj.HoldDuration > 0 then obj.HoldDuration = 0 end
+        obj.RequiresLineOfSight = false
+    end)
+end
+
+-- Initial pass once (yielded)
+task.spawn(function()
+    local desc = Workspace:GetDescendants()
+    for i = 1, #desc do
+        processPrompt(desc[i])
+        if i % 400 == 0 then task.wait() end
+    end
+end)
+
+Workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("ProximityPrompt") then
+        task.defer(processPrompt, obj)
+    end
+end)
+
+-- Light cleanup of dead refs occasionally (very light)
 task.spawn(function()
     while true do
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj:IsA("ProximityPrompt") then
-                pcall(function()
-                    if obj.HoldDuration and obj.HoldDuration > 0 then obj.HoldDuration = 0 end
-                    obj.RequiresLineOfSight = false
-                end)
+        task.wait(12)
+        for prompt in pairs(processedPrompts) do
+            if not prompt or not prompt.Parent then
+                processedPrompts[prompt] = nil
             end
         end
-        task.wait(3.2)
     end
 end)
 
@@ -640,7 +714,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Clean"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Fixed"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -904,10 +978,56 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
+-- Berat Ringan card
+local weightCard = Instance.new("Frame", settingsPage)
+weightCard.Size = UDim2.new(1, 0, 0, 48)
+weightCard.Position = UDim2.new(0, 0, 0, 76)
+weightCard.BackgroundColor3 = C.black
+weightCard.BackgroundTransparency = 0.2
+weightCard.BorderSizePixel = 0
+Instance.new("UICorner", weightCard).CornerRadius = UDim.new(0, 7)
+
+local wInfoLabel = Instance.new("TextLabel", weightCard)
+wInfoLabel.Size = UDim2.new(1, -70, 1, 0)
+wInfoLabel.Position = UDim2.new(0, 8, 0, 0)
+wInfoLabel.Text = "🪶 BERAT RINGAN 100%\nCrystalWeight → 0.1"
+wInfoLabel.TextColor3 = C.textMain
+wInfoLabel.TextSize = 8
+wInfoLabel.Font = Enum.Font.GothamBold
+wInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
+wInfoLabel.TextYAlignment = Enum.TextYAlignment.Center
+wInfoLabel.BackgroundTransparency = 1
+
+local weightToggleBtn = Instance.new("TextButton", weightCard)
+weightToggleBtn.Size = UDim2.new(0, 52, 0, 24)
+weightToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
+weightToggleBtn.Text = "LIGHT OFF"
+weightToggleBtn.TextColor3 = Color3.new(1, 1, 1)
+weightToggleBtn.TextSize = 7
+weightToggleBtn.Font = Enum.Font.GothamBold
+weightToggleBtn.BackgroundColor3 = C.red
+weightToggleBtn.BorderSizePixel = 0
+Instance.new("UICorner", weightToggleBtn).CornerRadius = UDim.new(0, 6)
+
+weightToggleBtn.MouseButton1Click:Connect(function()
+    lightWeightOn = not lightWeightOn
+    if lightWeightOn then
+        weightToggleBtn.Text = "LIGHT ON"
+        weightToggleBtn.BackgroundColor3 = C.green
+        -- Apply to all current targets
+        for _, data in ipairs(targetList) do
+            if data.part then applyLightWeight(data.part) end
+        end
+    else
+        weightToggleBtn.Text = "LIGHT OFF"
+        weightToggleBtn.BackgroundColor3 = C.red
+    end
+end)
+
 local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 80)
-pInfo.Size = UDim2.new(1, 0, 0, 40)
-pInfo.Text = "V20.1 Clean\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+"
+pInfo.Position = UDim2.new(0, 0, 0, 134)
+pInfo.Size = UDim2.new(1, 0, 0, 50)
+pInfo.Text = "V20.1 Fixed\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+\nValue/BaseValue filter • Berat Ringan"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1015,4 +1135,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V20.1 CLEAN LOADED ✔")
+print("❄ GEC MINE ANTARCTICA V20.1 FIXED LOADED ✔ | Lag fixed + Value/BaseValue + Berat Ringan")
