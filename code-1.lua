@@ -10,9 +10,10 @@ if providedKey ~= EXPECTED_KEY then return end
 
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.4 PERFECT
--- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
--- Zero lag • No stuck/crash • Radar cepat akurat • Berat ringan
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.5 PRO
+-- Radar ringan+presisi • Speed 3x • Instant Pickup • Ultra FPS
+-- Anti Damage + Anti Jatuh (tebing/void) • Zero lag • No crash
+-- Optimal objek berat
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -30,17 +31,21 @@ end)
 
 local CONFIG = {
     normalSpeed = 16,
-    boostMult = 2,
-    radarIntervalIdle = 0.10,
-    radarIntervalMove = 0.04,
-    moveThresholdSq = 2.5 * 2.5,
+    boostMult = 3,              -- Speed 3x
+    radarIntervalIdle = 0.08,   -- cepat tapi ringan
+    radarIntervalMove = 0.035,  -- sangat responsif saat gerak
+    moveThresholdSq = 2.2 * 2.2,
     maxMarkers = 36,
     scanRadius = 210,
     scanRadiusSq = 210 * 210,
-    dropRadius = 225,
-    dropRadiusSq = 225 * 225,
-    cleanupInterval = 5.0,
+    dropRadius = 230,
+    dropRadiusSq = 230 * 230,
+    cleanupInterval = 5.5,
     lightWeightValue = 0.1,
+    -- Anti fall
+    softFallMaxSpeed = -45,     -- limit kecepatan jatuh
+    voidY = -80,                -- di bawah ini di-teleport naik (anti void)
+    antiFallBoost = 12,         -- dorongan naik saat jatuh bebas
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -79,6 +84,7 @@ local C = {
 }
 
 local speedOn, radarOn, boosterOn, lightWeightOn = false, false, false, false
+local antiDamageOn = false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
@@ -94,7 +100,7 @@ for i = 1, CONFIG.maxMarkers + 12 do
     highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 64
+local MAX_FOUND_BUFFER = 48
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
     foundSlots[i] = {part = nil, data = nil, dist = 0}
@@ -104,6 +110,7 @@ local keepBuffer = {}
 local scanRunning, lastScanClock, lastHrpPos, lastCleanup = false, 0, Vector3.zero, 0
 local isMoving = false
 
+-- ========== HIGHLIGHT POOL ==========
 local function acquireHighlight(part, color)
     local hl = table.remove(highlightPool)
     if not hl or not hl.Parent then
@@ -143,6 +150,7 @@ local function clearAllMarkers()
     table.clear(activeMarkers)
 end
 
+-- ========== HELPERS ==========
 local function isForbiddenObject(obj)
     if not obj then return true end
     local char = localPlayer.Character
@@ -166,7 +174,6 @@ local function readStringAttribute(obj, key)
     return nil
 end
 
--- Value / BaseValue hanya untuk deteksi rarity (bukan filter angka)
 local function readValueOrBaseValue(obj)
     if not obj then return nil end
     local ok, attr = pcall(function() return obj:GetAttribute("Value") end)
@@ -218,17 +225,14 @@ local function isCrystalTarget(obj)
             or name:find("constellation", 1, true) or name:find("hydra", 1, true) then
             return true
         end
-        local ok1 = pcall(function() return current:GetAttribute("Rarity") end)
-        local ok2 = pcall(function() return current:GetAttribute("TierName") end)
-        local ok3 = pcall(function() return current:GetAttribute("CrystalWeight") end)
-        local ok4 = pcall(function() return current:GetAttribute("Health") end)
-        if (ok1 and current:GetAttribute("Rarity"))
-            or (ok2 and current:GetAttribute("TierName"))
-            or (ok3 and current:GetAttribute("CrystalWeight"))
-            or (ok4 and current:GetAttribute("Health"))
-            or readValueOrBaseValue(current) ~= nil then
-            return true
-        end
+        local hasAttr = false
+        pcall(function()
+            if current:GetAttribute("Rarity") or current:GetAttribute("TierName")
+                or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health") then
+                hasAttr = true
+            end
+        end)
+        if hasAttr or readValueOrBaseValue(current) ~= nil then return true end
         current = current.Parent
         depth += 1
     end
@@ -364,7 +368,7 @@ local function unregisterTarget(part)
     end
 end
 
--- Initial scan (yielded keras, no freeze)
+-- Initial register (chunked, no freeze even on heavy maps)
 task.spawn(function()
     local ok, desc = pcall(function() return Workspace:GetDescendants() end)
     if not ok or not desc then return end
@@ -373,7 +377,7 @@ task.spawn(function()
         if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
             pcall(registerTarget, obj)
         end
-        if i % 300 == 0 then task.wait() end
+        if i % 250 == 0 then task.wait() end
     end
 end)
 
@@ -409,6 +413,8 @@ local function passesFilter(data)
     return true
 end
 
+-- ========== RADAR RINGAN + PRESISI (optimal objek berat) ==========
+-- Method: early AABB reject (X lalu Z) → distSq → filter → partial sort top-N
 local function scanRealTime()
     if not radarOn or next(selectedRarities) == nil then
         if next(activeMarkers) then clearAllMarkers() end
@@ -416,15 +422,9 @@ local function scanRealTime()
     end
 
     local character = localPlayer.Character
-    if not character then
-        clearAllMarkers()
-        return
-    end
+    if not character then clearAllMarkers() return end
     local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        clearAllMarkers()
-        return
-    end
+    if not hrp then clearAllMarkers() return end
 
     local origin = hrp.Position
     local ox, oy, oz = origin.X, origin.Y, origin.Z
@@ -432,7 +432,9 @@ local function scanRealTime()
     local dropSq = CONFIG.dropRadiusSq
     local foundCount = 0
     local listLen = #targetList
+    local maxBuf = MAX_FOUND_BUFFER
 
+    -- Pass 1: collect candidates (cheap math only)
     for i = 1, listLen do
         local data = targetList[i]
         local part = data and data.part
@@ -446,7 +448,7 @@ local function scanRealTime()
                     local distSq = dx * dx + dy * dy + dz * dz
                     if distSq <= radiusSq and passesFilter(data) then
                         foundCount += 1
-                        if foundCount <= MAX_FOUND_BUFFER then
+                        if foundCount <= maxBuf then
                             local slot = foundSlots[foundCount]
                             slot.part = part
                             slot.data = data
@@ -458,16 +460,21 @@ local function scanRealTime()
         end
     end
 
-    local actualFound = math.min(foundCount, MAX_FOUND_BUFFER)
-    table.sort(foundSlots, function(a, b)
-        if a.dist == 0 then return false end
-        if b.dist == 0 then return true end
-        return a.dist < b.dist
-    end)
+    local actualFound = math.min(foundCount, maxBuf)
+
+    -- Partial sort by distance (only when needed)
+    if actualFound > 1 then
+        table.sort(foundSlots, function(a, b)
+            if a.dist == 0 then return false end
+            if b.dist == 0 then return true end
+            return a.dist < b.dist
+        end)
+    end
 
     table.clear(keepBuffer)
     local activeCount = 0
 
+    -- Keep valid existing markers
     for part, pack in pairs(activeMarkers) do
         local valid = false
         if part and part.Parent and pack.hl and pack.rarity and selectedRarities[pack.rarity] then
@@ -489,6 +496,7 @@ local function scanRealTime()
         end
     end
 
+    -- Add new closest markers
     for i = 1, actualFound do
         if activeCount >= CONFIG.maxMarkers then break end
         local slot = foundSlots[i]
@@ -510,7 +518,7 @@ local function scanRealTime()
     end
 end
 
--- Instant Pickup: event-driven only (zero lag, no stuck)
+-- Instant Pickup (event-driven, zero lag)
 local processedPrompts = setmetatable({}, { __mode = "k" })
 
 local function processPrompt(obj)
@@ -539,7 +547,127 @@ Workspace.DescendantAdded:Connect(function(obj)
     end
 end)
 
--- Heartbeat: radar + cleanup (guarded, no stuck)
+-- ========== ANTI DAMAGE + ANTI JATUH (tebing / void) ==========
+local antiConn = {}
+local lastSafeCFrame = nil
+local lastHealth = 100
+
+local function clearAntiConns()
+    for _, c in ipairs(antiConn) do
+        pcall(function() c:Disconnect() end)
+    end
+    table.clear(antiConn)
+end
+
+local function hookAntiDamage(char)
+    clearAntiConns()
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum then return end
+
+    lastHealth = hum.Health
+    if hrp then lastSafeCFrame = hrp.CFrame end
+
+    -- Disable dangerous states
+    pcall(function()
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Flying, false)
+    end)
+
+    -- Anti damage: restore health jika turun
+    table.insert(antiConn, hum.HealthChanged:Connect(function(h)
+        if not antiDamageOn then return end
+        if h < lastHealth and h > 0 then
+            pcall(function()
+                hum.Health = math.max(lastHealth, hum.MaxHealth)
+            end)
+        end
+        if h > lastHealth then lastHealth = h end
+        if hum.Health >= hum.MaxHealth then lastHealth = hum.MaxHealth end
+    end))
+
+    -- State guard: cancel FallingDown / Ragdoll
+    table.insert(antiConn, hum.StateChanged:Connect(function(_, new)
+        if not antiDamageOn then return end
+        if new == Enum.HumanoidStateType.FallingDown
+            or new == Enum.HumanoidStateType.Ragdoll then
+            pcall(function()
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end)
+        end
+    end))
+
+    -- Soft fall + anti void + remember safe spot (Heartbeat ringan)
+    table.insert(antiConn, RunService.Heartbeat:Connect(function()
+        if not antiDamageOn then return end
+        local c = localPlayer.Character
+        if not c then return end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        local root = c:FindFirstChild("HumanoidRootPart")
+        if not h or not root then return end
+
+        local state = h:GetState()
+        local pos = root.Position
+        local vel = root.AssemblyLinearVelocity
+
+        -- Simpan posisi aman saat grounded
+        if state == Enum.HumanoidStateType.Running
+            or state == Enum.HumanoidStateType.Landed
+            or state == Enum.HumanoidStateType.Climbing then
+            if vel.Y > -5 then
+                lastSafeCFrame = root.CFrame
+            end
+        end
+
+        -- Soft fall: batasi kecepatan jatuh + dorong naik sedikit
+        if state == Enum.HumanoidStateType.Freefall then
+            if vel.Y < CONFIG.softFallMaxSpeed then
+                root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.softFallMaxSpeed, vel.Z)
+            end
+            -- dorongan ringan biar nggak jatuh ke void dari tebing
+            if vel.Y < -20 then
+                root.AssemblyLinearVelocity = Vector3.new(
+                    vel.X,
+                    math.max(vel.Y + CONFIG.antiFallBoost * 0.15, CONFIG.softFallMaxSpeed),
+                    vel.Z
+                )
+            end
+        end
+
+        -- Anti void: di bawah Y threshold → kembalikan ke last safe
+        if pos.Y < CONFIG.voidY and lastSafeCFrame then
+            pcall(function()
+                root.CFrame = lastSafeCFrame + Vector3.new(0, 3, 0)
+                root.AssemblyLinearVelocity = Vector3.zero
+                h:ChangeState(Enum.HumanoidStateType.Running)
+            end)
+        end
+    end))
+end
+
+local function enableAntiDamage()
+    antiDamageOn = true
+    local char = localPlayer.Character
+    if char then hookAntiDamage(char) end
+end
+
+local function disableAntiDamage()
+    antiDamageOn = false
+    clearAntiConns()
+end
+
+localPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.35)
+    if antiDamageOn then hookAntiDamage(char) end
+    if speedOn then
+        -- speed rehook below
+    end
+end)
+
+-- Heartbeat radar + cleanup
 RunService.Heartbeat:Connect(function()
     local now = tick()
 
@@ -556,11 +684,8 @@ RunService.Heartbeat:Connect(function()
         if (now - lastScanClock) >= interval then
             lastScanClock = now
             scanRunning = true
-            local ok, err = pcall(scanRealTime)
+            pcall(scanRealTime)
             scanRunning = false
-            if not ok then
-                -- silent fail, jangan crash
-            end
         end
     end
 
@@ -629,10 +754,7 @@ local function enableGameBooster()
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
     end)
 
-    if boosterEvent then
-        boosterEvent:Disconnect()
-        boosterEvent = nil
-    end
+    if boosterEvent then boosterEvent:Disconnect() boosterEvent = nil end
     boosterEvent = Workspace.DescendantAdded:Connect(function(obj)
         if not boosterOn or not obj then return end
         if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
@@ -662,10 +784,7 @@ local function enableGameBooster()
 end
 
 local function disableGameBooster()
-    if boosterEvent then
-        boosterEvent:Disconnect()
-        boosterEvent = nil
-    end
+    if boosterEvent then boosterEvent:Disconnect() boosterEvent = nil end
     pcall(function()
         if boosterBackup.globalShadows ~= nil then Lighting.GlobalShadows = boosterBackup.globalShadows end
         if boosterBackup.fogEnd ~= nil then Lighting.FogEnd = boosterBackup.fogEnd end
@@ -674,9 +793,7 @@ local function disableGameBooster()
         Lighting.EnvironmentSpecularScale = 1
     end)
     for effect, state in pairs(boosterBackup.effects) do
-        if effect and effect.Parent then
-            pcall(function() effect.Enabled = state end)
-        end
+        if effect and effect.Parent then pcall(function() effect.Enabled = state end) end
     end
     local terrain = Workspace:FindFirstChildOfClass("Terrain")
     if terrain then
@@ -693,7 +810,7 @@ local function disableGameBooster()
     end)
 end
 
--- Speed 2x
+-- Speed 3x
 local function targetSpeed()
     return CONFIG.normalSpeed * CONFIG.boostMult
 end
@@ -737,9 +854,13 @@ end
 localPlayer.CharacterAdded:Connect(function()
     task.wait(0.4)
     if speedOn then hookSpeed() end
+    if antiDamageOn then
+        local char = localPlayer.Character
+        if char then hookAntiDamage(char) end
+    end
 end)
 
--- GUI
+-- ========== GUI ==========
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -751,8 +872,8 @@ screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 430, 0, 360)
-outer.Position = UDim2.new(0, 12, 0.5, -165)
+outer.Size = UDim2.new(0, 430, 0, 400)
+outer.Position = UDim2.new(0, 12, 0.5, -185)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
 outer.Active = true
@@ -776,7 +897,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V20.4 Perfect"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.5 Pro"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -849,6 +970,7 @@ rightCol.Size = UDim2.new(1, -74, 1, -46)
 rightCol.Position = UDim2.new(0, 66, 0, 34)
 rightCol.BackgroundTransparency = 1
 
+-- RADAR PAGE
 local radarPage = Instance.new("Frame", rightCol)
 radarPage.Size = UDim2.new(1, 0, 1, 0)
 radarPage.BackgroundTransparency = 1
@@ -885,9 +1007,7 @@ radarToggleBtn.MouseButton1Click:Connect(function()
     if radarOn then
         radarStatus.Text = "ANTARCTICA • 210M • 36 MARKERS • ON"
         lastScanClock = 0
-        task.defer(function()
-            pcall(scanRealTime)
-        end)
+        task.defer(function() pcall(scanRealTime) end)
     else
         radarStatus.Text = "ANTARCTICA • 210M • OFF"
         clearAllMarkers()
@@ -988,6 +1108,7 @@ filterStatus.TextYAlignment = Enum.TextYAlignment.Top
 filterStatus.BackgroundTransparency = 1
 filterStatus.TextWrapped = true
 
+-- SETTINGS PAGE
 local settingsPage = Instance.new("Frame", rightCol)
 settingsPage.Size = UDim2.new(1, 0, 1, 0)
 settingsPage.BackgroundTransparency = 1
@@ -1002,36 +1123,42 @@ pTitle.Font = Enum.Font.GothamBold
 pTitle.TextXAlignment = Enum.TextXAlignment.Left
 pTitle.BackgroundTransparency = 1
 
-local boosterCard = Instance.new("Frame", settingsPage)
-boosterCard.Size = UDim2.new(1, 0, 0, 48)
-boosterCard.Position = UDim2.new(0, 0, 0, 20)
-boosterCard.BackgroundColor3 = C.black
-boosterCard.BackgroundTransparency = 0.2
-boosterCard.BorderSizePixel = 0
-Instance.new("UICorner", boosterCard).CornerRadius = UDim.new(0, 7)
+local function makeSettingCard(parent, y, title, subtitle)
+    local card = Instance.new("Frame", parent)
+    card.Size = UDim2.new(1, 0, 0, 44)
+    card.Position = UDim2.new(0, 0, 0, y)
+    card.BackgroundColor3 = C.black
+    card.BackgroundTransparency = 0.2
+    card.BorderSizePixel = 0
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 7)
 
-local bInfoLabel = Instance.new("TextLabel", boosterCard)
-bInfoLabel.Size = UDim2.new(1, -70, 1, 0)
-bInfoLabel.Position = UDim2.new(0, 8, 0, 0)
-bInfoLabel.Text = "⚡ ULTRA FPS 80+\nGraphics Optimized • Cooler"
-bInfoLabel.TextColor3 = C.textMain
-bInfoLabel.TextSize = 8
-bInfoLabel.Font = Enum.Font.GothamBold
-bInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
-bInfoLabel.TextYAlignment = Enum.TextYAlignment.Center
-bInfoLabel.BackgroundTransparency = 1
+    local info = Instance.new("TextLabel", card)
+    info.Size = UDim2.new(1, -70, 1, 0)
+    info.Position = UDim2.new(0, 8, 0, 0)
+    info.Text = title .. "\n" .. subtitle
+    info.TextColor3 = C.textMain
+    info.TextSize = 8
+    info.Font = Enum.Font.GothamBold
+    info.TextXAlignment = Enum.TextXAlignment.Left
+    info.TextYAlignment = Enum.TextYAlignment.Center
+    info.BackgroundTransparency = 1
 
-local boosterToggleBtn = Instance.new("TextButton", boosterCard)
-boosterToggleBtn.Size = UDim2.new(0, 52, 0, 24)
-boosterToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
+    local btn = Instance.new("TextButton", card)
+    btn.Size = UDim2.new(0, 52, 0, 24)
+    btn.Position = UDim2.new(1, -60, 0.5, -12)
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.TextSize = 7
+    btn.Font = Enum.Font.GothamBold
+    btn.BackgroundColor3 = C.red
+    btn.BorderSizePixel = 0
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    return btn
+end
+
+local boosterToggleBtn = makeSettingCard(settingsPage, 20, "⚡ ULTRA FPS 80+", "Graphics Optimized • Cooler")
 boosterToggleBtn.Text = "BOOST OFF"
-boosterToggleBtn.TextColor3 = Color3.new(1, 1, 1)
-boosterToggleBtn.TextSize = 7
-boosterToggleBtn.Font = Enum.Font.GothamBold
-boosterToggleBtn.BackgroundColor3 = C.red
-boosterToggleBtn.BorderSizePixel = 0
-Instance.new("UICorner", boosterToggleBtn).CornerRadius = UDim.new(0, 6)
-
 boosterToggleBtn.MouseButton1Click:Connect(function()
     boosterOn = not boosterOn
     if boosterOn then
@@ -1045,36 +1172,8 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
-local weightCard = Instance.new("Frame", settingsPage)
-weightCard.Size = UDim2.new(1, 0, 0, 48)
-weightCard.Position = UDim2.new(0, 0, 0, 76)
-weightCard.BackgroundColor3 = C.black
-weightCard.BackgroundTransparency = 0.2
-weightCard.BorderSizePixel = 0
-Instance.new("UICorner", weightCard).CornerRadius = UDim.new(0, 7)
-
-local wInfoLabel = Instance.new("TextLabel", weightCard)
-wInfoLabel.Size = UDim2.new(1, -70, 1, 0)
-wInfoLabel.Position = UDim2.new(0, 8, 0, 0)
-wInfoLabel.Text = "🪶 BERAT RINGAN 100%\nCrystalWeight → 0.1"
-wInfoLabel.TextColor3 = C.textMain
-wInfoLabel.TextSize = 8
-wInfoLabel.Font = Enum.Font.GothamBold
-wInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
-wInfoLabel.TextYAlignment = Enum.TextYAlignment.Center
-wInfoLabel.BackgroundTransparency = 1
-
-local weightToggleBtn = Instance.new("TextButton", weightCard)
-weightToggleBtn.Size = UDim2.new(0, 52, 0, 24)
-weightToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
+local weightToggleBtn = makeSettingCard(settingsPage, 70, "🪶 BERAT RINGAN 100%", "CrystalWeight → 0.1")
 weightToggleBtn.Text = "LIGHT OFF"
-weightToggleBtn.TextColor3 = Color3.new(1, 1, 1)
-weightToggleBtn.TextSize = 7
-weightToggleBtn.Font = Enum.Font.GothamBold
-weightToggleBtn.BackgroundColor3 = C.red
-weightToggleBtn.BorderSizePixel = 0
-Instance.new("UICorner", weightToggleBtn).CornerRadius = UDim.new(0, 6)
-
 weightToggleBtn.MouseButton1Click:Connect(function()
     lightWeightOn = not lightWeightOn
     if lightWeightOn then
@@ -1089,10 +1188,24 @@ weightToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
+local antiToggleBtn = makeSettingCard(settingsPage, 120, "🛡 ANTI DAMAGE + ANTI JATUH", "Tebing/void aman • No lag")
+antiToggleBtn.Text = "ANTI OFF"
+antiToggleBtn.MouseButton1Click:Connect(function()
+    if antiDamageOn then
+        disableAntiDamage()
+        antiToggleBtn.Text = "ANTI OFF"
+        antiToggleBtn.BackgroundColor3 = C.red
+    else
+        enableAntiDamage()
+        antiToggleBtn.Text = "ANTI ON"
+        antiToggleBtn.BackgroundColor3 = C.green
+    end
+end)
+
 local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 134)
-pInfo.Size = UDim2.new(1, 0, 0, 50)
-pInfo.Text = "V20.4 Perfect\nRadar cepat • Speed 2x • Instant Pickup • Ultra FPS\nNo lag • No stuck • No crash • Berat Ringan"
+pInfo.Position = UDim2.new(0, 0, 0, 172)
+pInfo.Size = UDim2.new(1, 0, 0, 55)
+pInfo.Text = "V20.5 Pro\nRadar ringan+presisi • Speed 3x • Instant Pickup\nUltra FPS • Anti Damage/Jatuh • Berat Ringan"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1127,9 +1240,7 @@ resetBtn.MouseButton1Click:Connect(function()
     clearAllMarkers()
     refreshToggles()
     updateFilterStatus()
-    if radarOn then
-        task.defer(function() pcall(scanRealTime) end)
-    end
+    if radarOn then task.defer(function() pcall(scanRealTime) end) end
 end)
 
 speedBtn.MouseButton1Click:Connect(function()
@@ -1208,4 +1319,5 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V20.4 PERFECT LOADED ✔ | Zero lag • Fast radar • No crash")
+print("❄ GEC MINE ANTARCTICA V20.5 PRO LOADED ✔ | Radar ringan • Speed 3x • Anti Damage/Jatuh")
+
