@@ -8,9 +8,9 @@ if providedKey == nil and type(_G) == "table" then providedKey = _G.key end
 if providedKey ~= EXPECTED_KEY then return end
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V2.00 (EXTREME UPGRADE)
--- Multi-Target Radar (60+ Instant) • Anti-Slip Slope Lock 100%
--- Speed 3x (Anti-Rubberband) • Anti Damage/Jatuh • Ultra FPS 100%
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V3.00 (AI PREDICTIVE)
+-- Heuristic AI Radar 200M • Instant Fresh-Spawn Priority
+-- 100% Slope-Lock Anti-Slip • Speed 3x • Ultra FPS 100% Extreme
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -30,20 +30,35 @@ end)
 local CONFIG = {
 	normalSpeed = 16,
 	boostMult = 3,
-	radarIntervalIdle = 0.05,
-	radarIntervalMove = 0.02,
-	moveThresholdSq = 1.5 * 1.5,
+	radarIntervalIdle = 0.04,
+	radarIntervalMove = 0.015,
+	moveThresholdSq = 1.2 * 1.2,
 	maxMarkers = 64,
-	scanRadius = 210,
-	scanRadiusSq = 210 * 210,
-	dropRadius = 230,
-	dropRadiusSq = 230 * 230,
-	cleanupInterval = 4.0,
+	scanRadius = 200,          -- Kunci tepat 200 meter
+	scanRadiusSq = 200 * 200,  -- 40,000 stud^2
+	dropRadius = 200,          -- Lewat 200m langsung hilang
+	dropRadiusSq = 200 * 200,
+	cleanupInterval = 3.5,
 	lightWeightValue = 0.1,
 	softFallMaxSpeed = -40,
 	voidY = -80,
-	antiFallBoost = 12,
-	groundFriction = 50, -- Friksi maksimal anti slip
+	antiFallBoost = 15,
+	groundFriction = 100,      -- Friksi ekstrem anti gelincir
+}
+
+-- Algoritma AI Weights (Prioritas Valuasi, Arah Jalur & Fresh Spawn)
+local AI_WEIGHTS = {
+	Rarity = {
+		Mythic = 110, Exotic = 95, Legendary = 75,
+		Epic = 55, Rare = 35, Uncommon = 20, Common = 10
+	},
+	Nexus = {
+		["Void Nexus"] = 135,
+		["Solar Nexus"] = 125,
+		["Aether Nexus"] = 120
+	},
+	FreshSpawnBoost = 40,  -- Kristal yang baru spawn diberi boost skor
+	PathAngleFactor = 30,  -- Kristal di depan arah lari diberi prioritas
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -86,22 +101,22 @@ local antiDamageOn = false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
-local highlightPool = table.create(CONFIG.maxMarkers + 20)
+local highlightPool = table.create(CONFIG.maxMarkers + 24)
 
-for i = 1, CONFIG.maxMarkers + 20 do
+for i = 1, CONFIG.maxMarkers + 24 do
 	local hl = Instance.new("Highlight")
 	hl.Name = "HyperHL"
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	hl.FillTransparency = 0.30
+	hl.FillTransparency = 0.28
 	hl.OutlineTransparency = 0
 	hl.Enabled = false
 	highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 120
+local MAX_FOUND_BUFFER = 128
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
-	foundSlots[i] = {part = nil, data = nil, dist = 0}
+	foundSlots[i] = {part = nil, data = nil, dist = 0, aiScore = 0}
 end
 
 local keepBuffer = {}
@@ -115,7 +130,7 @@ local function acquireHighlight(part, color)
 		hl = Instance.new("Highlight")
 		hl.Name = "HyperHL"
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		hl.FillTransparency = 0.30
+		hl.FillTransparency = 0.28
 		hl.OutlineTransparency = 0
 	end
 	hl.FillColor = color
@@ -319,6 +334,8 @@ local function applyLightWeight(obj)
 	end)
 end
 
+local scanRealTime
+
 local function registerTarget(obj)
 	if not obj or isForbiddenObject(obj) then return end
 	local ok, part = pcall(getWorldPart, obj)
@@ -328,12 +345,26 @@ local function registerTarget(obj)
 	if not (nexus or crystal) then return end
 	local rarity = getRarityName(part)
 	local data = {
-		part = part, nexus = nexus, crystal = crystal, rarity = rarity,
-		category = nil, color = resolveColor(part, nexus, rarity),
+		part = part,
+		nexus = nexus,
+		crystal = crystal,
+		rarity = rarity,
+		category = nil,
+		color = resolveColor(part, nexus, rarity),
+		spawnTime = tick(), -- Catat waktu muncul untuk AI fresh-spawn priority
 	}
 	targetRegistry[part] = data
 	table.insert(targetList, data)
 	if lightWeightOn then applyLightWeight(obj) end
+	
+	-- Jika radar aktif dan kristal spawn di dekat player, langsung trigger scan
+	if radarOn then
+		local char = localPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp and (part.Position - hrp.Position).Magnitude <= CONFIG.scanRadius then
+			task.defer(function() pcall(scanRealTime) end)
+		end
+	end
 end
 
 local function unregisterTarget(part)
@@ -383,8 +414,44 @@ local function passesFilter(data)
 	return true
 end
 
--- SCAN REAL-TIME SUPER CEPAT (Mampu scan 60+ marker sekaligus tanpa lag)
-local function scanRealTime()
+-- ==================== ALGORITMA AI RADAR EVALUATION ====================
+local function calculateAIScore(data, dx, dy, dz, distSq, moveDir, lookVec, now)
+	local dist = math.sqrt(distSq)
+	local baseScore = 0
+
+	if data.nexus and AI_WEIGHTS.Nexus[data.nexus] then
+		baseScore = AI_WEIGHTS.Nexus[data.nexus]
+	elseif data.rarity and AI_WEIGHTS.Rarity[data.rarity] then
+		baseScore = AI_WEIGHTS.Rarity[data.rarity]
+	else
+		baseScore = 10
+	end
+
+	-- 1. Proximity Score (Makin dekat makin tinggi prioritas)
+	local proximityScore = (1 - (dist / CONFIG.scanRadius)) * 60
+
+	-- 2. Fresh-Spawn Bonus (Kristal baru spawn < 10 detik diberi prioritas tinggi)
+	local freshBonus = 0
+	if data.spawnTime and (now - data.spawnTime) < 10 then
+		freshBonus = (1 - ((now - data.spawnTime) / 10)) * AI_WEIGHTS.FreshSpawnBoost
+	end
+
+	-- 3. Predictive Trajectory AI (Prediksi arah lari karakter)
+	local headingBonus = 0
+	local headingDir = moveDir.Magnitude > 0.1 and moveDir or lookVec
+	local targetDirXZ = Vector3.new(dx, 0, dz)
+	if targetDirXZ.Magnitude > 0.1 then
+		local dot = headingDir:Dot(targetDirXZ.Unit)
+		if dot > 0 then
+			headingBonus = dot * AI_WEIGHTS.PathAngleFactor
+		end
+	end
+
+	return baseScore + proximityScore + freshBonus + headingBonus
+end
+
+-- ==================== SCAN REAL-TIME DENGAN AI ====================
+scanRealTime = function()
 	if not radarOn or next(selectedRarities) == nil then
 		if next(activeMarkers) then clearAllMarkers() end
 		return
@@ -392,11 +459,16 @@ local function scanRealTime()
 	local character = localPlayer.Character
 	if not character then clearAllMarkers() return end
 	local hrp = character:FindFirstChild("HumanoidRootPart")
+	local hum = character:FindFirstChildOfClass("Humanoid")
 	if not hrp then clearAllMarkers() return end
 
 	local origin = hrp.Position
 	local ox, oy, oz = origin.X, origin.Y, origin.Z
-	local radiusSq, dropSq = CONFIG.scanRadiusSq, CONFIG.dropRadiusSq
+	local radiusSq = CONFIG.scanRadiusSq
+	local moveDir = hum and hum.MoveDirection or Vector3.zero
+	local lookVec = hrp.CFrame.LookVector
+	local now = tick()
+
 	local foundCount = 0
 	local listLen = #targetList
 	local maxBuf = MAX_FOUND_BUFFER
@@ -407,32 +479,35 @@ local function scanRealTime()
 		if part and part.Parent then
 			local pos = part.Position
 			local dx = pos.X - ox
-			if dx * dx <= radiusSq then
-				local dz = pos.Z - oz
-				if dz * dz <= radiusSq then
-					local dy = pos.Y - oy
-					local distSq = dx * dx + dy * dy + dz * dz
-					if distSq <= radiusSq and passesFilter(data) then
-						foundCount += 1
-						if foundCount <= maxBuf then
-							local slot = foundSlots[foundCount]
-							slot.part, slot.data, slot.dist = part, data, distSq
-						end
-					end
+			local dz = pos.Z - oz
+			local dy = pos.Y - oy
+			local distSq = dx * dx + dy * dy + dz * dz
+
+			-- STRICT 200M: Hanya proses yang <= 200m
+			if distSq <= radiusSq and passesFilter(data) then
+				foundCount += 1
+				if foundCount <= maxBuf then
+					local slot = foundSlots[foundCount]
+					slot.part = part
+					slot.data = data
+					slot.dist = distSq
+					slot.aiScore = calculateAIScore(data, dx, dy, dz, distSq, moveDir, lookVec, now)
 				end
 			end
 		end
 	end
 
 	local actualFound = math.min(foundCount, maxBuf)
+	-- Sorting berbasis Skor AI Tertinggi
 	if actualFound > 1 then
 		table.sort(foundSlots, function(a, b)
-			if a.dist == 0 then return false end
-			if b.dist == 0 then return true end
-			return a.dist < b.dist
+			if not a or a.aiScore == 0 then return false end
+			if not b or b.aiScore == 0 then return true end
+			return a.aiScore > b.aiScore
 		end)
 	end
 
+	-- STRICT REMOVAL: Jika jarak > 200m atau tidak valid, buang langsung
 	table.clear(keepBuffer)
 	local activeCount = 0
 	for part, pack in pairs(activeMarkers) do
@@ -440,7 +515,10 @@ local function scanRealTime()
 		if part and part.Parent and pack.hl and pack.rarity and selectedRarities[pack.rarity] then
 			local pos = part.Position
 			local dx, dy, dz = pos.X - ox, pos.Y - oy, pos.Z - oz
-			if (dx * dx + dy * dy + dz * dz) <= dropSq then
+			local distSq = dx * dx + dy * dy + dz * dz
+			
+			-- HAPUS SEKETIKA JIKA MELEWATI 200M
+			if distSq <= radiusSq then
 				local data = targetRegistry[part]
 				if data and passesFilter(data) then
 					valid = true
@@ -452,6 +530,7 @@ local function scanRealTime()
 		if not valid then releaseHighlight(part) end
 	end
 
+	-- Pasang Marker untuk Target Terbaik Berdasarkan AI
 	for i = 1, actualFound do
 		if activeCount >= CONFIG.maxMarkers then break end
 		local slot = foundSlots[i]
@@ -467,7 +546,10 @@ local function scanRealTime()
 	end
 
 	for i = 1, actualFound do
-		foundSlots[i].dist, foundSlots[i].part, foundSlots[i].data = 0, nil, nil
+		foundSlots[i].dist = 0
+		foundSlots[i].aiScore = 0
+		foundSlots[i].part = nil
+		foundSlots[i].data = nil
 	end
 end
 
@@ -495,7 +577,7 @@ Workspace.DescendantAdded:Connect(function(obj)
 	if obj and obj:IsA("ProximityPrompt") then task.defer(processPrompt, obj) end
 end)
 
--- ========== SPEED 3x FIXED (Anti-Rubberband) ==========
+-- ========== SPEED 3x (Anti-Rubberband) ==========
 local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
 local speedConn, speedHeartbeat = nil, nil
 
@@ -545,34 +627,36 @@ local function unhookSpeed()
 	if hum then pcall(function() hum.WalkSpeed = CONFIG.normalSpeed end) end
 end
 
--- ========== ANTI DAMAGE + ANTI JATUH + ANTI TERGELINCIR 100% FIXED ==========
+-- ========== ANTI-SLIP & ANTI-DAMAGE (100% ZERO SLIP SLOPE LOCK) ==========
 local antiConn = {}
 local lastSafeCFrame = nil
 local lastHealth = 100
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
 local function clearAntiConns()
 	for _, c in ipairs(antiConn) do pcall(function() c:Disconnect() end) end
 	table.clear(antiConn)
 end
 
--- Terapkan friksi super kuat ke SELURUH part karakter
 local function applyAntiSlipFull(char, hum)
 	if not char then return end
 	for _, part in ipairs(char:GetDescendants()) do
 		if part:IsA("BasePart") then
 			pcall(function()
 				part.CustomPhysicalProperties = PhysicalProperties.new(
-					1.5,                    -- Density
-					CONFIG.groundFriction,  -- Friction (Tinggi = 0 gelincir di es)
-					0,                      -- Elasticity
-					100,                    -- FrictionWeight (Override terrain)
-					100                     -- ElasticityWeight
+					2.0,                   -- Density tinggi
+					CONFIG.groundFriction, -- Friksi 100
+					0,                     -- Nol elastisitas
+					100,                   -- FrictionWeight 100 (Mutlak kalahkan es)
+					100
 				)
 			end)
 		end
 	end
 	if hum then
 		pcall(function()
+			hum.MaxSlopeAngle = 89.5 -- Cegah state jatuh saat naik tebing terjal
 			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 		end)
@@ -584,13 +668,11 @@ local function hookAntiDamage(char)
 	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	local hrp = char:FindFirstChild("HumanoidRootPart")
-	if not hum then return end
+	if not hum or not hrp then return end
 
 	lastHealth = hum.Health
-	if hrp then
-		lastSafeCFrame = hrp.CFrame
-		applyAntiSlipFull(char, hum)
-	end
+	lastSafeCFrame = hrp.CFrame
+	applyAntiSlipFull(char, hum)
 
 	table.insert(antiConn, hum.HealthChanged:Connect(function(h)
 		if not antiDamageOn then return end
@@ -611,8 +693,8 @@ local function hookAntiDamage(char)
 		end
 	end))
 
-	-- Physics Controller: Slope Locking & Soft Landing
-	table.insert(antiConn, RunService.Heartbeat:Connect(function()
+	-- SLOPE-LOCK PHYSICS INTERCEPTOR (Dijalankan di PreSimulation & Heartbeat)
+	local function processSlopePhysics()
 		if not antiDamageOn then return end
 		local c = localPlayer.Character
 		if not c then return end
@@ -625,29 +707,26 @@ local function hookAntiDamage(char)
 		local vel = root.AssemblyLinearVelocity
 		local moveDir = h.MoveDirection
 
-		-- SLOPE LOCK ANTI GELINCIR: Jika player diam di tebing es, hilangkan velositas merosot
-		if state == Enum.HumanoidStateType.Running
-			or state == Enum.HumanoidStateType.Landed
-			or state == Enum.HumanoidStateType.Climbing then
-			
+		rayParams.FilterDescendantsInstances = {c}
+		local groundRay = Workspace:Raycast(pos, Vector3.new(0, -5.5, 0), rayParams)
+		local isGrounded = groundRay ~= nil or h.FloorMaterial ~= Enum.Material.Air
+
+		if isGrounded then
 			if vel.Y > -5 then lastSafeCFrame = root.CFrame end
-			
+
+			-- 100% SLOPE LOCK: Jika tidak menekan tombol gerak, hilangkan semua luncuran
 			if moveDir.Magnitude < 0.05 then
-				-- Nol-kan kecepatan geser horizontal saat berhenti
-				root.AssemblyLinearVelocity = Vector3.new(0, math.clamp(vel.Y, -5, 5), 0)
+				root.AssemblyLinearVelocity = Vector3.new(0, math.clamp(vel.Y, -2, 2), 0)
 			else
-				-- Jika sedang lari, kunci agar tidak tergelincir berlebih
-				local horiz = Vector3.new(vel.X, 0, vel.Z)
-				local maxSpd = (speedOn and targetSpeed() or CONFIG.normalSpeed) * 1.15
-				if horiz.Magnitude > maxSpd then
-					local capped = horiz.Unit * maxSpd
-					root.AssemblyLinearVelocity = Vector3.new(capped.X, vel.Y, capped.Z)
-				end
+				-- Jika bergerak, kunci velositas tepat ke arah tombol
+				local targetSpeedVal = speedOn and targetSpeed() or CONFIG.normalSpeed
+				local desired = moveDir * targetSpeedVal
+				root.AssemblyLinearVelocity = Vector3.new(desired.X, vel.Y, desired.Z)
 			end
 		end
 
 		-- Anti Damage Jatuh
-		if state == Enum.HumanoidStateType.Freefall then
+		if state == Enum.HumanoidStateType.Freefall and not isGrounded then
 			if vel.Y < CONFIG.softFallMaxSpeed then
 				root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.softFallMaxSpeed, vel.Z)
 			end
@@ -668,7 +747,10 @@ local function hookAntiDamage(char)
 				h:ChangeState(Enum.HumanoidStateType.Running)
 			end)
 		end
-	end))
+	end
+
+	table.insert(antiConn, RunService.Stepped:Connect(processSlopePhysics))
+	table.insert(antiConn, RunService.Heartbeat:Connect(processSlopePhysics))
 end
 
 local function enableAntiDamage()
@@ -727,7 +809,7 @@ RunService.Heartbeat:Connect(function()
 	end
 end)
 
--- ========== ULTRA FPS 100% EXTREME BOOSTER ==========
+-- ========== ULTRA FPS 100% POTATO EXTREME ==========
 local boosterBackup = { effects = {}, savedSettings = {} }
 local boosterEvent = nil
 
@@ -837,7 +919,7 @@ local function disableGameBooster()
 	end)
 end
 
--- ========== GUI MODERN & LIGHTWEIGHT ==========
+-- ========== GUI MODERN ==========
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -874,7 +956,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V2.00 Ultra"
+titleLabel.Text = "❄ Gec Mine Antarctica • V3.00 AI"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -981,11 +1063,11 @@ radarToggleBtn.MouseButton1Click:Connect(function()
 	setRadarVis(radarOn)
 	refreshRadarToggle()
 	if radarOn then
-		radarStatus.Text = "ANTARCTICA • 210M • 64 MARKERS • ON"
+		radarStatus.Text = "AI ANTARCTICA • 200M STRICT • ON"
 		lastScanClock = 0
 		task.defer(function() pcall(scanRealTime) end)
 	else
-		radarStatus.Text = "ANTARCTICA • 210M • OFF"
+		radarStatus.Text = "AI ANTARCTICA • 200M • OFF"
 		clearAllMarkers()
 	end
 end)
@@ -1046,7 +1128,7 @@ end
 radarStatus = Instance.new("TextLabel", radarPage)
 radarStatus.Size = UDim2.new(1, 0, 0, 22)
 radarStatus.Position = UDim2.new(0, 0, 0, 52)
-radarStatus.Text = "ANTARCTICA • 210M • OFF"
+radarStatus.Text = "AI ANTARCTICA • 200M • OFF"
 radarStatus.TextColor3 = C.textMain
 radarStatus.TextSize = 9
 radarStatus.Font = Enum.Font.GothamBold
@@ -1157,7 +1239,7 @@ weightToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local antiToggleBtn = makeSettingCard(settingsPage, 118, "🛡 ANTI DAMAGE & SLIP", "Full Slope Lock • Tebing Es Aman")
+local antiToggleBtn = makeSettingCard(settingsPage, 118, "🛡 ANTI DAMAGE & SLIP", "100% Slope Lock • Tebing Es Aman")
 antiToggleBtn.Text = "ANTI OFF"
 antiToggleBtn.MouseButton1Click:Connect(function()
 	if antiDamageOn then
@@ -1174,7 +1256,7 @@ end)
 local pInfo = Instance.new("TextLabel", settingsPage)
 pInfo.Position = UDim2.new(0, 0, 0, 175)
 pInfo.Size = UDim2.new(1, 0, 0, 50)
-pInfo.Text = "V2.00 Extreme Edition\nSpeed 3x • Radar Multi-Target 60+ Presisi • Anti-Slip 100%\nInstant Pickup • Ultra FPS Potato 100%"
+pInfo.Text = "V3.00 AI Edition\nSpeed 3x • AI Radar 200M Strict • Anti-Slip Slope Lock 100%\nInstant Pickup • Ultra FPS Potato 100%"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1288,4 +1370,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V2.00 LOADED ✔ | Anti-Slip & Multi-Radar Fixed 100%")
+print("❄ GEC MINE ANTARCTICA V3.00 AI LOADED ✔ | Heuristic AI 200M Strict & Slope-Lock Ready")
