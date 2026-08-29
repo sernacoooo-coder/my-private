@@ -10,9 +10,9 @@ if providedKey ~= EXPECTED_KEY then return end
 
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN (FIXED)
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.3 COMPLETE
 -- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
--- Fixed lag | Value/BaseValue filter 100% | Berat ringan 100%
+-- Zero lag | Min Value INPUT di Radar | Value/BaseValue | Berat ringan
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -31,16 +31,16 @@ end)
 local CONFIG = {
     normalSpeed = 16,
     boostMult = 2,
-    radarIntervalIdle = 0.12,
-    radarIntervalMove = 0.05,
+    radarIntervalIdle = 0.18,   -- lebih santai saat diam = zero lag
+    radarIntervalMove = 0.07,  -- tetap responsif saat gerak
     moveThresholdSq = 2.5 * 2.5,
     maxMarkers = 36,
     scanRadius = 210,
     scanRadiusSq = 210 * 210,
     dropRadius = 225,
     dropRadiusSq = 225 * 225,
-    cleanupInterval = 4.5,
-    lightWeightValue = 0.1, -- berat ringan 100%
+    cleanupInterval = 6.0,     -- cleanup lebih jarang
+    lightWeightValue = 0.1,
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -80,6 +80,7 @@ local C = {
 
 local speedOn, radarOn, boosterOn, lightWeightOn = false, false, false, false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
+local minValueFilter = 0 -- 0 = no filter | set 1000 / 1000000 dll
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
 local highlightPool = table.create(CONFIG.maxMarkers + 10)
@@ -163,15 +164,49 @@ local function readStringAttribute(obj, key)
     return nil
 end
 
--- Baca Value / BaseValue (Attribute ATAU child NumberValue/IntValue/StringValue) 100%
+-- Baca Value / BaseValue (Attribute ATAU child) → return number atau nil
+local function readNumericValue(obj)
+    if not obj then return nil end
+    local function toNum(v)
+        if type(v) == "number" then return v end
+        if type(v) == "string" then
+            local n = tonumber(v:gsub("[,%s]", ""))
+            return n
+        end
+        return nil
+    end
+    -- Attribute
+    local ok, attr = pcall(function() return obj:GetAttribute("Value") end)
+    if ok and attr ~= nil then
+        local n = toNum(attr)
+        if n then return n end
+    end
+    ok, attr = pcall(function() return obj:GetAttribute("BaseValue") end)
+    if ok and attr ~= nil then
+        local n = toNum(attr)
+        if n then return n end
+    end
+    -- Child
+    local v = obj:FindFirstChild("Value")
+    if v and (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue")) then
+        local n = toNum(v.Value)
+        if n then return n end
+    end
+    local bv = obj:FindFirstChild("BaseValue")
+    if bv and (bv:IsA("NumberValue") or bv:IsA("IntValue") or bv:IsA("StringValue")) then
+        local n = toNum(bv.Value)
+        if n then return n end
+    end
+    return nil
+end
+
+-- Baca raw Value/BaseValue (buat rarity text match juga)
 local function readValueOrBaseValue(obj)
     if not obj then return nil end
-    -- Attribute dulu
     local ok, attr = pcall(function() return obj:GetAttribute("Value") end)
     if ok and attr ~= nil then return attr end
     ok, attr = pcall(function() return obj:GetAttribute("BaseValue") end)
     if ok and attr ~= nil then return attr end
-    -- Child Value / BaseValue
     local v = obj:FindFirstChild("Value")
     if v and (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue")) then
         return v.Value
@@ -241,11 +276,8 @@ local function getRarityName(part)
             current:GetAttribute("Rarity"), current:GetAttribute("TierName"),
             current:GetAttribute("Tier"), current:GetAttribute("RarityName"), getObjectName(current),
         }
-        -- Value / BaseValue support 100%
         local vb = readValueOrBaseValue(current)
-        if vb ~= nil then
-            table.insert(values, vb)
-        end
+        if vb ~= nil then table.insert(values, vb) end
         for _, rawValue in ipairs(values) do
             local normalized = normalizeName(tostring(rawValue or ""))
             if normalized ~= "" then
@@ -260,6 +292,20 @@ local function getRarityName(part)
         depth += 1
     end
     return nil
+end
+
+-- Ambil numeric Value/BaseValue tertinggi di hierarchy (untuk filter min value)
+local function getCrystalValue(part)
+    if not part then return nil end
+    local best = nil
+    local current, depth = part, 0
+    while current and current ~= Workspace and depth < 7 do
+        local n = readNumericValue(current)
+        if n and (not best or n > best) then best = n end
+        current = current.Parent
+        depth += 1
+    end
+    return best
 end
 
 local function getCrystalCategory(part)
@@ -302,7 +348,6 @@ local function getWorldPart(obj)
     return nil
 end
 
--- Set berat ringan 100%
 local function applyLightWeight(obj)
     if not obj or not lightWeightOn then return end
     pcall(function()
@@ -329,7 +374,16 @@ local function registerTarget(obj)
     local crystal = isCrystalTarget(obj) or isCrystalTarget(part)
     if nexus or crystal then
         local rarity = getRarityName(part)
-        local data = {part = part, nexus = nexus, crystal = crystal, rarity = rarity, category = nil, color = resolveColor(part, nexus, rarity)}
+        local value = getCrystalValue(part)
+        local data = {
+            part = part,
+            nexus = nexus,
+            crystal = crystal,
+            rarity = rarity,
+            category = nil,
+            value = value,
+            color = resolveColor(part, nexus, rarity),
+        }
         targetRegistry[part] = data
         table.insert(targetList, data)
         if lightWeightOn then applyLightWeight(obj) end
@@ -349,14 +403,16 @@ local function unregisterTarget(part)
     end
 end
 
+-- Register initial (yielded keras biar zero lag load)
 task.spawn(function()
     local desc = Workspace:GetDescendants()
-    for i = 1, #desc do
+    local n = #desc
+    for i = 1, n do
         local obj = desc[i]
         if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
             pcall(registerTarget, obj)
         end
-        if i % 450 == 0 then task.wait() end
+        if i % 350 == 0 then task.wait() end
     end
 end)
 
@@ -376,6 +432,16 @@ end)
 local function passesFilter(data)
     if not data or next(selectedRarities) == nil then return false end
     if not data.rarity or not selectedRarities[data.rarity] then return false end
+    -- Min Value filter: harus >= minValueFilter (kalau minValueFilter > 0)
+    if minValueFilter > 0 then
+        local v = data.value
+        if v == nil then
+            -- coba refresh value sekali
+            v = getCrystalValue(data.part)
+            data.value = v
+        end
+        if v == nil or v < minValueFilter then return false end
+    end
     if next(selectedNexus) and (not data.nexus or not selectedNexus[data.nexus]) then return false end
     if next(selectedCategories) then
         if not data.category then data.category = getCrystalCategory(data.part) end
@@ -398,8 +464,9 @@ local function scanRealTime()
     local ox, oy, oz = origin.X, origin.Y, origin.Z
     local radiusSq, dropSq = CONFIG.scanRadiusSq, CONFIG.dropRadiusSq
     local foundCount = 0
+    local listLen = #targetList
 
-    for i = 1, #targetList do
+    for i = 1, listLen do
         local data = targetList[i]
         local part = data.part
         if part and part.Parent then
@@ -437,9 +504,13 @@ local function scanRealTime()
             local pos = part.Position
             local dx, dy, dz = pos.X - ox, pos.Y - oy, pos.Z - oz
             if (dx*dx + dy*dy + dz*dz) <= dropSq then
-                valid = true
-                keepBuffer[part] = true
-                activeCount += 1
+                -- re-check value filter biar marker yang di bawah threshold hilang
+                local data = targetRegistry[part]
+                if data and passesFilter(data) then
+                    valid = true
+                    keepBuffer[part] = true
+                    activeCount += 1
+                end
             end
         end
         if not valid then releaseHighlight(part) end
@@ -464,8 +535,8 @@ local function scanRealTime()
     end
 end
 
--- Instant Pickup (FIXED LAG: no full GetDescendants loop every few sec)
-local processedPrompts = {}
+-- Instant Pickup ZERO LAG (event-driven only)
+local processedPrompts = setmetatable({}, {__mode = "k"})
 local function processPrompt(obj)
     if not obj or not obj:IsA("ProximityPrompt") or processedPrompts[obj] then return end
     processedPrompts[obj] = true
@@ -475,30 +546,17 @@ local function processPrompt(obj)
     end)
 end
 
--- Initial pass once (yielded)
 task.spawn(function()
     local desc = Workspace:GetDescendants()
     for i = 1, #desc do
         processPrompt(desc[i])
-        if i % 400 == 0 then task.wait() end
+        if i % 500 == 0 then task.wait() end
     end
 end)
 
 Workspace.DescendantAdded:Connect(function(obj)
     if obj:IsA("ProximityPrompt") then
         task.defer(processPrompt, obj)
-    end
-end)
-
--- Light cleanup of dead refs occasionally (very light)
-task.spawn(function()
-    while true do
-        task.wait(12)
-        for prompt in pairs(processedPrompts) do
-            if not prompt or not prompt.Parent then
-                processedPrompts[prompt] = nil
-            end
-        end
     end
 end)
 
@@ -602,7 +660,7 @@ local function enableGameBooster()
                 pcall(function() obj.CastShadow = false end)
             end
             count += 1
-            if count % 300 == 0 then task.wait() end
+            if count % 400 == 0 then task.wait() end
         end
     end)
 end
@@ -634,7 +692,7 @@ local function disableGameBooster()
     end)
 end
 
--- Speed 2x Modern
+-- Speed 2x
 local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
 local speedConn, speedRenderConn = nil, nil
 
@@ -689,8 +747,8 @@ screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 430, 0, 360)
-outer.Position = UDim2.new(0, 12, 0.5, -165)
+outer.Size = UDim2.new(0, 430, 0, 420)
+outer.Position = UDim2.new(0, 12, 0.5, -195)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
 outer.Active = true
@@ -714,7 +772,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Fixed"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.3 Complete"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -898,9 +956,86 @@ radarStatus.BorderSizePixel = 0
 Instance.new("UICorner", radarStatus).CornerRadius = UDim.new(0, 7)
 Instance.new("UIPadding", radarStatus).PaddingLeft = UDim.new(0, 7)
 
+-- ========== MIN VALUE INPUT (Value / BaseValue) — RADAR PAGE ==========
+local valueTitle = Instance.new("TextLabel", radarPage)
+valueTitle.Size = UDim2.new(1, 0, 0, 12)
+valueTitle.Position = UDim2.new(0, 0, 0, 78)
+valueTitle.Text = "MIN VALUE / BASEVALUE  (isi angka → APPLY)"
+valueTitle.TextColor3 = C.orange
+valueTitle.TextSize = 8
+valueTitle.Font = Enum.Font.GothamBold
+valueTitle.TextXAlignment = Enum.TextXAlignment.Left
+valueTitle.BackgroundTransparency = 1
+
+local valueRow = Instance.new("Frame", radarPage)
+valueRow.Size = UDim2.new(1, 0, 0, 32)
+valueRow.Position = UDim2.new(0, 0, 0, 92)
+valueRow.BackgroundColor3 = C.black
+valueRow.BackgroundTransparency = 0.1
+valueRow.BorderSizePixel = 0
+Instance.new("UICorner", valueRow).CornerRadius = UDim.new(0, 8)
+local valueStroke = Instance.new("UIStroke", valueRow)
+valueStroke.Color = C.orange
+valueStroke.Thickness = 1.2
+valueStroke.Transparency = 0.4
+
+local valueLabel = Instance.new("TextLabel", valueRow)
+valueLabel.Size = UDim2.new(0, 78, 1, 0)
+valueLabel.Position = UDim2.new(0, 8, 0, 0)
+valueLabel.Text = "VALUE ≥"
+valueLabel.TextColor3 = C.orange
+valueLabel.TextSize = 10
+valueLabel.Font = Enum.Font.GothamBold
+valueLabel.TextXAlignment = Enum.TextXAlignment.Left
+valueLabel.BackgroundTransparency = 1
+
+local valueBox = Instance.new("TextBox", valueRow)
+valueBox.Size = UDim2.new(0, 130, 0, 22)
+valueBox.Position = UDim2.new(0, 86, 0.5, -11)
+valueBox.Text = "0"
+valueBox.PlaceholderText = "contoh: 1000 / 1000000"
+valueBox.TextColor3 = Color3.new(1, 1, 1)
+valueBox.PlaceholderColor3 = C.textSub
+valueBox.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+valueBox.Font = Enum.Font.GothamBold
+valueBox.TextSize = 11
+valueBox.BorderSizePixel = 0
+valueBox.ClearTextOnFocus = false
+valueBox.TextXAlignment = Enum.TextXAlignment.Center
+Instance.new("UICorner", valueBox).CornerRadius = UDim.new(0, 6)
+
+local valueApplyBtn = Instance.new("TextButton", valueRow)
+valueApplyBtn.Size = UDim2.new(0, 58, 0, 22)
+valueApplyBtn.Position = UDim2.new(1, -66, 0.5, -11)
+valueApplyBtn.Text = "APPLY"
+valueApplyBtn.TextColor3 = Color3.new(1, 1, 1)
+valueApplyBtn.BackgroundColor3 = C.accent
+valueApplyBtn.Font = Enum.Font.GothamBold
+valueApplyBtn.TextSize = 9
+valueApplyBtn.BorderSizePixel = 0
+Instance.new("UICorner", valueApplyBtn).CornerRadius = UDim.new(0, 6)
+
+local function applyMinValue()
+    local raw = valueBox.Text:gsub("[,%s]", "")
+    local n = tonumber(raw)
+    if not n or n < 0 then n = 0 end
+    minValueFilter = n
+    valueBox.Text = tostring(n)
+    updateFilterStatus()
+    if radarOn then
+        if next(selectedRarities) == nil then clearAllMarkers()
+        else task.defer(scanRealTime) end
+    end
+end
+
+valueApplyBtn.MouseButton1Click:Connect(applyMinValue)
+valueBox.FocusLost:Connect(function(enter)
+    applyMinValue()
+end)
+
 local resetBtn = Instance.new("TextButton", radarPage)
 resetBtn.Size = UDim2.new(1, 0, 0, 22)
-resetBtn.Position = UDim2.new(0, 0, 0, 78)
+resetBtn.Position = UDim2.new(0, 0, 0, 130)
 resetBtn.Text = "↺ RESET FILTER"
 resetBtn.TextColor3 = Color3.new(1, 1, 1)
 resetBtn.BackgroundColor3 = C.red
@@ -910,8 +1045,8 @@ resetBtn.BorderSizePixel = 0
 Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 7)
 
 local filterStatus = Instance.new("TextLabel", radarPage)
-filterStatus.Size = UDim2.new(1, 0, 0, 30)
-filterStatus.Position = UDim2.new(0, 0, 0, 104)
+filterStatus.Size = UDim2.new(1, 0, 0, 40)
+filterStatus.Position = UDim2.new(0, 0, 0, 156)
 filterStatus.Text = ""
 filterStatus.TextColor3 = C.green
 filterStatus.TextSize = 9
@@ -978,7 +1113,6 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Berat Ringan card
 local weightCard = Instance.new("Frame", settingsPage)
 weightCard.Size = UDim2.new(1, 0, 0, 48)
 weightCard.Position = UDim2.new(0, 0, 0, 76)
@@ -1014,7 +1148,6 @@ weightToggleBtn.MouseButton1Click:Connect(function()
     if lightWeightOn then
         weightToggleBtn.Text = "LIGHT ON"
         weightToggleBtn.BackgroundColor3 = C.green
-        -- Apply to all current targets
         for _, data in ipairs(targetList) do
             if data.part then applyLightWeight(data.part) end
         end
@@ -1026,8 +1159,8 @@ end)
 
 local pInfo = Instance.new("TextLabel", settingsPage)
 pInfo.Position = UDim2.new(0, 0, 0, 134)
-pInfo.Size = UDim2.new(1, 0, 0, 50)
-pInfo.Text = "V20.1 Fixed\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+\nValue/BaseValue filter • Berat Ringan"
+pInfo.Size = UDim2.new(1, 0, 0, 55)
+pInfo.Text = "V20.3 Complete\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+\nMin Value INPUT di Radar • Value/BaseValue • Berat Ringan"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1046,6 +1179,9 @@ function updateFilterStatus()
     local cCount = 0
     for _ in pairs(selectedCategories) do cCount += 1 end
     if cCount > 0 then table.insert(parts, cCount .. " cat") end
+    if minValueFilter > 0 then
+        table.insert(parts, "Value ≥ " .. tostring(minValueFilter))
+    end
     filterStatus.Text = #parts > 0 and table.concat(parts, " | ") or "Filter: SEMUA NONAKTIF"
 end
 
@@ -1059,6 +1195,8 @@ resetBtn.MouseButton1Click:Connect(function()
     table.clear(selectedRarities)
     table.clear(selectedCategories)
     table.clear(selectedNexus)
+    minValueFilter = 0
+    valueBox.Text = "0"
     clearAllMarkers()
     refreshToggles()
     updateFilterStatus()
@@ -1135,4 +1273,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V20.1 FIXED LOADED ✔ | Lag fixed + Value/BaseValue + Berat Ringan")
+print("❄ GEC MINE ANTARCTICA V20.3 COMPLETE LOADED ✔ | Min Value INPUT di Radar page")
