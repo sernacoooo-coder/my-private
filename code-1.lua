@@ -10,8 +10,8 @@ if providedKey ~= EXPECTED_KEY then return end
 
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN
--- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V21.0 STRONG
+-- Radar Perfect + Ultra FPS Extreme + Crystal Info Panel
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -30,15 +30,16 @@ end)
 local CONFIG = {
     normalSpeed = 16,
     boostMult = 2,
-    radarIntervalIdle = 0.12,
-    radarIntervalMove = 0.05,
-    moveThresholdSq = 2.5 * 2.5,
-    maxMarkers = 36,
+    radarIntervalIdle = 0.14,
+    radarIntervalMove = 0.06,
+    moveThresholdSq = 2.2 * 2.2,
+    maxMarkers = 32,
     scanRadius = 210,
     scanRadiusSq = 210 * 210,
     dropRadius = 225,
     dropRadiusSq = 225 * 225,
-    cleanupInterval = 4.5,
+    cleanupInterval = 5,
+    infoUpdateInterval = 0.35,
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -80,27 +81,28 @@ local speedOn, radarOn, boosterOn = false, false, false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
-local highlightPool = table.create(CONFIG.maxMarkers + 10)
+local highlightPool = table.create(CONFIG.maxMarkers + 8)
 
-for i = 1, CONFIG.maxMarkers + 10 do
+for i = 1, CONFIG.maxMarkers + 8 do
     local hl = Instance.new("Highlight")
     hl.Name = "HyperHL"
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.FillTransparency = 0.30
+    hl.FillTransparency = 0.28
     hl.OutlineTransparency = 0
     hl.Enabled = false
     highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 64
+local MAX_FOUND_BUFFER = 48
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
     foundSlots[i] = {part = nil, data = nil, dist = 0}
 end
 
 local keepBuffer = {}
-local scanRunning, lastScanClock, lastHrpPos, lastCleanup = false, 0, Vector3.zero, 0
+local scanRunning, lastScanClock, lastHrpPos, lastCleanup, lastInfoUpdate = false, 0, Vector3.zero, 0, 0
 local isMoving = false
+local currentDetected = {} -- for info panel
 
 local function acquireHighlight(part, color)
     local hl = table.remove(highlightPool)
@@ -108,7 +110,7 @@ local function acquireHighlight(part, color)
         hl = Instance.new("Highlight")
         hl.Name = "HyperHL"
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.FillTransparency = 0.30
+        hl.FillTransparency = 0.28
         hl.OutlineTransparency = 0
     end
     hl.FillColor = color
@@ -161,9 +163,15 @@ local function readStringAttribute(obj, key)
     return nil
 end
 
+local function readNumberAttribute(obj, key)
+    local ok, value = pcall(function() return obj:GetAttribute(key) end)
+    if ok and type(value) == "number" then return value end
+    return nil
+end
+
 local function getObjectName(obj)
     if not obj then return "" end
-    for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName"}) do
+    for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName", "Name"}) do
         local value = readStringAttribute(obj, key)
         if value then return value end
     end
@@ -196,7 +204,8 @@ local function isCrystalTarget(obj)
             return true
         end
         if current:GetAttribute("Rarity") or current:GetAttribute("TierName")
-            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health") then
+            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health")
+            or current:GetAttribute("Price") or current:GetAttribute("Value") then
             return true
         end
         current = current.Parent
@@ -251,6 +260,45 @@ local function getCrystalCategory(part)
     return nil
 end
 
+local function getCrystalInfo(part)
+    if not part then return "Unknown", 0, 0 end
+    local name = getObjectName(part)
+    local weight = readNumberAttribute(part, "CrystalWeight")
+        or readNumberAttribute(part, "Weight")
+        or readNumberAttribute(part, "Mass")
+        or 0
+    local price = readNumberAttribute(part, "Price")
+        or readNumberAttribute(part, "Value")
+        or readNumberAttribute(part, "SellPrice")
+        or readNumberAttribute(part, "Cost")
+        or 0
+
+    -- fallback naik ke parent
+    if weight == 0 or price == 0 then
+        local current = part.Parent
+        local depth = 0
+        while current and current ~= Workspace and depth < 5 do
+            if weight == 0 then
+                weight = readNumberAttribute(current, "CrystalWeight")
+                    or readNumberAttribute(current, "Weight")
+                    or readNumberAttribute(current, "Mass")
+                    or weight
+            end
+            if price == 0 then
+                price = readNumberAttribute(current, "Price")
+                    or readNumberAttribute(current, "Value")
+                    or readNumberAttribute(current, "SellPrice")
+                    or readNumberAttribute(current, "Cost")
+                    or price
+            end
+            if weight > 0 and price > 0 then break end
+            current = current.Parent
+            depth += 1
+        end
+    end
+    return name, weight, price
+end
+
 local function resolveColor(part, nexusName, rarityHint)
     if nexusName and RARITY_COLORS[nexusName] then return RARITY_COLORS[nexusName] end
     local r = tonumber(part:GetAttribute("TierColorR"))
@@ -282,7 +330,14 @@ local function registerTarget(obj)
     local crystal = isCrystalTarget(obj) or isCrystalTarget(part)
     if nexus or crystal then
         local rarity = getRarityName(part)
-        local data = {part = part, nexus = nexus, crystal = crystal, rarity = rarity, category = nil, color = resolveColor(part, nexus, rarity)}
+        local data = {
+            part = part,
+            nexus = nexus,
+            crystal = crystal,
+            rarity = rarity,
+            category = nil,
+            color = resolveColor(part, nexus, rarity)
+        }
         targetRegistry[part] = data
         table.insert(targetList, data)
     end
@@ -308,7 +363,7 @@ task.spawn(function()
         if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
             pcall(registerTarget, obj)
         end
-        if i % 450 == 0 then task.wait() end
+        if i % 500 == 0 then task.wait() end
     end
 end)
 
@@ -336,12 +391,13 @@ end
 local function scanRealTime()
     if not radarOn or next(selectedRarities) == nil then
         if next(activeMarkers) then clearAllMarkers() end
+        table.clear(currentDetected)
         return
     end
     local character = localPlayer.Character
-    if not character then clearAllMarkers() return end
+    if not character then clearAllMarkers() table.clear(currentDetected) return end
     local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then clearAllMarkers() return end
+    if not hrp then clearAllMarkers() table.clear(currentDetected) return end
 
     local origin = hrp.Position
     local ox, oy, oz = origin.X, origin.Y, origin.Z
@@ -394,6 +450,7 @@ local function scanRealTime()
         if not valid then releaseHighlight(part) end
     end
 
+    table.clear(currentDetected)
     for i = 1, actualFound do
         if activeCount >= CONFIG.maxMarkers then break end
         local slot = foundSlots[i]
@@ -405,6 +462,17 @@ local function scanRealTime()
                 activeCount += 1
             end
             keepBuffer[part] = true
+        end
+        -- isi info panel
+        if part and #currentDetected < 18 then
+            local name, weight, price = getCrystalInfo(part)
+            table.insert(currentDetected, {
+                name = name,
+                weight = weight,
+                price = price,
+                rarity = slot.data.rarity or "?",
+                color = slot.data.color
+            })
         end
     end
 
@@ -424,7 +492,7 @@ task.spawn(function()
                 end)
             end
         end
-        task.wait(3.2)
+        task.wait(3.5)
     end
 end)
 
@@ -456,7 +524,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- Ultra FPS 80+
+-- ====================== ULTRA FPS EXTREME ======================
 local boosterBackup = {effects = {}, savedSettings = {}}
 local boosterEvent = nil
 
@@ -464,22 +532,26 @@ local function enableGameBooster()
     boosterBackup.globalShadows = Lighting.GlobalShadows
     boosterBackup.fogEnd = Lighting.FogEnd
     boosterBackup.brightness = Lighting.Brightness
+    boosterBackup.ambient = Lighting.Ambient
+    boosterBackup.outdoorAmbient = Lighting.OutdoorAmbient
 
     pcall(function()
         Lighting.GlobalShadows = false
         Lighting.FogEnd = 9e9
         Lighting.FogStart = 0
-        Lighting.Brightness = 1.25
+        Lighting.Brightness = 1.1
         Lighting.EnvironmentDiffuseScale = 0
         Lighting.EnvironmentSpecularScale = 0
-        Lighting.Ambient = Color3.fromRGB(50, 50, 50)
-        Lighting.OutdoorAmbient = Color3.fromRGB(50, 50, 50)
+        Lighting.Ambient = Color3.fromRGB(40, 40, 40)
+        Lighting.OutdoorAmbient = Color3.fromRGB(40, 40, 40)
+        Lighting.Technology = Enum.Technology.Compatibility -- paling ringan
     end)
 
     table.clear(boosterBackup.effects)
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostProcessEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
-            or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
+            or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect")
+            or effect:IsA("DepthOfFieldEffect") or effect:IsA("Atmosphere") then
             boosterBackup.effects[effect] = effect.Enabled
             pcall(function() effect.Enabled = false end)
         end
@@ -495,6 +567,7 @@ local function enableGameBooster()
             terrain.WaterWaveSize = 0
             terrain.WaterWaveSpeed = 0
             terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 1
         end)
     end
 
@@ -504,16 +577,21 @@ local function enableGameBooster()
             UserGameSettings.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
         end
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
     end)
 
     if boosterEvent then boosterEvent:Disconnect() end
     boosterEvent = Workspace.DescendantAdded:Connect(function(obj)
         if not boosterOn then return end
         if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-            or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+            or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles")
+            or obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
             pcall(function() obj.Enabled = false end)
         elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-            pcall(function() obj.CastShadow = false end)
+            pcall(function()
+                obj.CastShadow = false
+                obj.Material = Enum.Material.SmoothPlastic
+            end)
         end
     end)
 
@@ -522,13 +600,16 @@ local function enableGameBooster()
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if not boosterOn then break end
             if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-                or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles")
+                or obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
                 pcall(function() obj.Enabled = false end)
             elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-                pcall(function() obj.CastShadow = false end)
+                pcall(function()
+                    obj.CastShadow = false
+                end)
             end
             count += 1
-            if count % 300 == 0 then task.wait() end
+            if count % 250 == 0 then task.wait() end
         end
     end)
 end
@@ -539,8 +620,11 @@ local function disableGameBooster()
         if boosterBackup.globalShadows ~= nil then Lighting.GlobalShadows = boosterBackup.globalShadows end
         if boosterBackup.fogEnd ~= nil then Lighting.FogEnd = boosterBackup.fogEnd end
         if boosterBackup.brightness ~= nil then Lighting.Brightness = boosterBackup.brightness end
+        if boosterBackup.ambient then Lighting.Ambient = boosterBackup.ambient end
+        if boosterBackup.outdoorAmbient then Lighting.OutdoorAmbient = boosterBackup.outdoorAmbient end
         Lighting.EnvironmentDiffuseScale = 1
         Lighting.EnvironmentSpecularScale = 1
+        Lighting.Technology = Enum.Technology.Future
     end)
     for effect, state in pairs(boosterBackup.effects) do
         if effect and effect.Parent then pcall(function() effect.Enabled = state end) end
@@ -560,7 +644,7 @@ local function disableGameBooster()
     end)
 end
 
--- Speed 2x Modern
+-- Speed 2x
 local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
 local speedConn, speedRenderConn = nil, nil
 
@@ -603,7 +687,7 @@ localPlayer.CharacterAdded:Connect(function()
     if speedOn then hookSpeed() end
 end)
 
--- GUI
+-- ====================== GUI ======================
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -615,8 +699,8 @@ screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 430, 0, 360)
-outer.Position = UDim2.new(0, 12, 0.5, -165)
+outer.Size = UDim2.new(0, 430, 0, 480) -- lebih tinggi untuk info panel
+outer.Position = UDim2.new(0, 12, 0.5, -220)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
 outer.Active = true
@@ -640,7 +724,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Clean"
+titleLabel.Text = "❄ Gec Mine Antarctica • V21.0 Strong"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -713,6 +797,7 @@ rightCol.Size = UDim2.new(1, -74, 1, -46)
 rightCol.Position = UDim2.new(0, 66, 0, 34)
 rightCol.BackgroundTransparency = 1
 
+-- ====================== RADAR PAGE ======================
 local radarPage = Instance.new("Frame", rightCol)
 radarPage.Size = UDim2.new(1, 0, 1, 0)
 radarPage.BackgroundTransparency = 1
@@ -747,12 +832,13 @@ radarToggleBtn.MouseButton1Click:Connect(function()
     setRadarVis(radarOn)
     refreshRadarToggle()
     if radarOn then
-        radarStatus.Text = "ANTARCTICA • 210M • 36 MARKERS • ON"
+        radarStatus.Text = "ANTARCTICA • 210M • 32 MARKERS • ON"
         lastScanClock = 0
         task.defer(scanRealTime)
     else
         radarStatus.Text = "ANTARCTICA • 210M • OFF"
         clearAllMarkers()
+        table.clear(currentDetected)
     end
 end)
 
@@ -810,8 +896,8 @@ for _, category in ipairs(CATEGORIES) do
 end
 
 radarStatus = Instance.new("TextLabel", radarPage)
-radarStatus.Size = UDim2.new(1, 0, 0, 22)
-radarStatus.Position = UDim2.new(0, 0, 0, 52)
+radarStatus.Size = UDim2.new(1, 0, 0, 20)
+radarStatus.Position = UDim2.new(0, 0, 0, 50)
 radarStatus.Text = "ANTARCTICA • 210M • OFF"
 radarStatus.TextColor3 = C.textMain
 radarStatus.TextSize = 9
@@ -825,8 +911,8 @@ Instance.new("UICorner", radarStatus).CornerRadius = UDim.new(0, 7)
 Instance.new("UIPadding", radarStatus).PaddingLeft = UDim.new(0, 7)
 
 local resetBtn = Instance.new("TextButton", radarPage)
-resetBtn.Size = UDim2.new(1, 0, 0, 22)
-resetBtn.Position = UDim2.new(0, 0, 0, 78)
+resetBtn.Size = UDim2.new(1, 0, 0, 20)
+resetBtn.Position = UDim2.new(0, 0, 0, 74)
 resetBtn.Text = "↺ RESET FILTER"
 resetBtn.TextColor3 = Color3.new(1, 1, 1)
 resetBtn.BackgroundColor3 = C.red
@@ -836,17 +922,136 @@ resetBtn.BorderSizePixel = 0
 Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 7)
 
 local filterStatus = Instance.new("TextLabel", radarPage)
-filterStatus.Size = UDim2.new(1, 0, 0, 30)
-filterStatus.Position = UDim2.new(0, 0, 0, 104)
+filterStatus.Size = UDim2.new(1, 0, 0, 18)
+filterStatus.Position = UDim2.new(0, 0, 0, 98)
 filterStatus.Text = ""
 filterStatus.TextColor3 = C.green
-filterStatus.TextSize = 9
+filterStatus.TextSize = 8
 filterStatus.Font = Enum.Font.GothamBold
 filterStatus.TextXAlignment = Enum.TextXAlignment.Left
 filterStatus.TextYAlignment = Enum.TextYAlignment.Top
 filterStatus.BackgroundTransparency = 1
 filterStatus.TextWrapped = true
 
+-- ====================== CRYSTAL INFO PANEL ======================
+local infoTitle = Instance.new("TextLabel", radarPage)
+infoTitle.Size = UDim2.new(1, 0, 0, 16)
+infoTitle.Position = UDim2.new(0, 0, 0, 120)
+infoTitle.Text = "📦 DETECTED CRYSTALS"
+infoTitle.TextColor3 = C.orange
+infoTitle.TextSize = 9
+infoTitle.Font = Enum.Font.GothamBold
+infoTitle.TextXAlignment = Enum.TextXAlignment.Left
+infoTitle.BackgroundTransparency = 1
+
+local infoScroll = Instance.new("ScrollingFrame", radarPage)
+infoScroll.Size = UDim2.new(1, 0, 0, 230)
+infoScroll.Position = UDim2.new(0, 0, 0, 138)
+infoScroll.BackgroundColor3 = C.black
+infoScroll.BackgroundTransparency = 0.15
+infoScroll.BorderSizePixel = 0
+infoScroll.ScrollBarThickness = 4
+infoScroll.ScrollBarImageColor3 = C.accent
+infoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+infoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Instance.new("UICorner", infoScroll).CornerRadius = UDim.new(0, 8)
+Instance.new("UIPadding", infoScroll).PaddingTop = UDim.new(0, 4)
+Instance.new("UIPadding", infoScroll).PaddingBottom = UDim.new(0, 4)
+Instance.new("UIPadding", infoScroll).PaddingLeft = UDim.new(0, 4)
+Instance.new("UIPadding", infoScroll).PaddingRight = UDim.new(0, 4)
+
+local infoList = Instance.new("UIListLayout", infoScroll)
+infoList.Padding = UDim.new(0, 3)
+infoList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local infoRows = {} -- pool
+
+local function clearInfoRows()
+    for _, row in ipairs(infoRows) do
+        row.Visible = false
+    end
+end
+
+local function getOrCreateRow(index)
+    if infoRows[index] then return infoRows[index] end
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -4, 0, 28)
+    row.BackgroundColor3 = Color3.fromRGB(22, 22, 26)
+    row.BorderSizePixel = 0
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local nameLbl = Instance.new("TextLabel", row)
+    nameLbl.Name = "Name"
+    nameLbl.Size = UDim2.new(0.48, 0, 1, 0)
+    nameLbl.Position = UDim2.new(0, 6, 0, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.TextColor3 = C.textMain
+    nameLbl.TextSize = 9
+    nameLbl.Font = Enum.Font.GothamBold
+    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+    nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local weightLbl = Instance.new("TextLabel", row)
+    weightLbl.Name = "Weight"
+    weightLbl.Size = UDim2.new(0.22, 0, 1, 0)
+    weightLbl.Position = UDim2.new(0.50, 0, 0, 0)
+    weightLbl.BackgroundTransparency = 1
+    weightLbl.TextColor3 = C.green
+    weightLbl.TextSize = 9
+    weightLbl.Font = Enum.Font.Gotham
+    weightLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    local priceLbl = Instance.new("TextLabel", row)
+    priceLbl.Name = "Price"
+    priceLbl.Size = UDim2.new(0.26, 0, 1, 0)
+    priceLbl.Position = UDim2.new(0.72, 0, 0, 0)
+    priceLbl.BackgroundTransparency = 1
+    priceLbl.TextColor3 = C.orange
+    priceLbl.TextSize = 9
+    priceLbl.Font = Enum.Font.GothamBold
+    priceLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+    row.Parent = infoScroll
+    infoRows[index] = row
+    return row
+end
+
+local function updateInfoPanel()
+    clearInfoRows()
+    for i, item in ipairs(currentDetected) do
+        local row = getOrCreateRow(i)
+        row.Visible = true
+        row.NameLbl = row:FindFirstChild("Name")
+        local nameLbl = row:FindFirstChild("Name")
+        local weightLbl = row:FindFirstChild("Weight")
+        local priceLbl = row:FindFirstChild("Price")
+
+        if nameLbl then
+            nameLbl.Text = item.name or "Unknown"
+            nameLbl.TextColor3 = item.color or C.textMain
+        end
+        if weightLbl then
+            weightLbl.Text = (item.weight and item.weight > 0) and string.format("%.1f kg", item.weight) or "-"
+        end
+        if priceLbl then
+            priceLbl.Text = (item.price and item.price > 0) and ("$" .. tostring(math.floor(item.price))) or "-"
+        end
+    end
+end
+
+-- update info panel secara berkala
+task.spawn(function()
+    while true do
+        if radarOn and #currentDetected > 0 then
+            pcall(updateInfoPanel)
+        else
+            clearInfoRows()
+        end
+        task.wait(CONFIG.infoUpdateInterval)
+    end
+end)
+
+-- ====================== SETTINGS PAGE ======================
 local settingsPage = Instance.new("Frame", rightCol)
 settingsPage.Size = UDim2.new(1, 0, 1, 0)
 settingsPage.BackgroundTransparency = 1
@@ -862,8 +1067,8 @@ pTitle.TextXAlignment = Enum.TextXAlignment.Left
 pTitle.BackgroundTransparency = 1
 
 local boosterCard = Instance.new("Frame", settingsPage)
-boosterCard.Size = UDim2.new(1, 0, 0, 48)
-boosterCard.Position = UDim2.new(0, 0, 0, 20)
+boosterCard.Size = UDim2.new(1, 0, 0, 52)
+boosterCard.Position = UDim2.new(0, 0, 0, 22)
 boosterCard.BackgroundColor3 = C.black
 boosterCard.BackgroundTransparency = 0.2
 boosterCard.BorderSizePixel = 0
@@ -872,7 +1077,7 @@ Instance.new("UICorner", boosterCard).CornerRadius = UDim.new(0, 7)
 local bInfoLabel = Instance.new("TextLabel", boosterCard)
 bInfoLabel.Size = UDim2.new(1, -70, 1, 0)
 bInfoLabel.Position = UDim2.new(0, 8, 0, 0)
-bInfoLabel.Text = "⚡ ULTRA FPS 80+\nGraphics Optimized • Cooler"
+bInfoLabel.Text = "⚡ ULTRA FPS EXTREME\nGraphics + Lighting + Particles + Shadows OFF"
 bInfoLabel.TextColor3 = C.textMain
 bInfoLabel.TextSize = 8
 bInfoLabel.Font = Enum.Font.GothamBold
@@ -905,9 +1110,9 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
 end)
 
 local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 80)
-pInfo.Size = UDim2.new(1, 0, 0, 40)
-pInfo.Text = "V20.1 Clean\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+"
+pInfo.Position = UDim2.new(0, 0, 0, 90)
+pInfo.Size = UDim2.new(1, 0, 0, 50)
+pInfo.Text = "V21.0 Strong\nRadar Perfect • Speed 2x • Instant Pickup\nUltra FPS Extreme + Crystal Info Panel"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -940,6 +1145,7 @@ resetBtn.MouseButton1Click:Connect(function()
     table.clear(selectedCategories)
     table.clear(selectedNexus)
     clearAllMarkers()
+    table.clear(currentDetected)
     refreshToggles()
     updateFilterStatus()
     if radarOn then task.defer(scanRealTime) end
@@ -1015,4 +1221,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V20.1 CLEAN LOADED ✔")
+print("❄ GEC MINE ANTARCTICA V21.0 STRONG LOADED ✔")
