@@ -10,8 +10,8 @@ if providedKey ~= EXPECTED_KEY then return end
 
 
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V21.1 CLEAN
--- Radar Perfect + Ultra FPS Extreme + Instant Hit
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V20.1 CLEAN
+-- Radar + Speed 2x + Instant Pickup + Ultra FPS 80+
 -- =================================================================
 
 local Players = game:GetService("Players")
@@ -30,16 +30,15 @@ end)
 local CONFIG = {
     normalSpeed = 16,
     boostMult = 2,
-    radarIntervalIdle = 0.14,
-    radarIntervalMove = 0.06,
-    moveThresholdSq = 2.2 * 2.2,
-    maxMarkers = 32,
+    radarIntervalIdle = 0.12,
+    radarIntervalMove = 0.05,
+    moveThresholdSq = 2.5 * 2.5,
+    maxMarkers = 36,
     scanRadius = 210,
     scanRadiusSq = 210 * 210,
     dropRadius = 225,
     dropRadiusSq = 225 * 225,
-    cleanupInterval = 5,
-    instantHitInterval = 0.08,
+    cleanupInterval = 4.5,
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -77,30 +76,30 @@ local C = {
     textSub = Color3.fromRGB(130, 136, 148),
 }
 
-local speedOn, radarOn, boosterOn, instantHitOn = false, false, false, false
+local speedOn, radarOn, boosterOn = false, false, false
 local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
 local targetRegistry, targetList = {}, {}
 local activeMarkers = {}
-local highlightPool = table.create(CONFIG.maxMarkers + 8)
+local highlightPool = table.create(CONFIG.maxMarkers + 10)
 
-for i = 1, CONFIG.maxMarkers + 8 do
+for i = 1, CONFIG.maxMarkers + 10 do
     local hl = Instance.new("Highlight")
     hl.Name = "HyperHL"
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.FillTransparency = 0.28
+    hl.FillTransparency = 0.30
     hl.OutlineTransparency = 0
     hl.Enabled = false
     highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 48
+local MAX_FOUND_BUFFER = 64
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
     foundSlots[i] = {part = nil, data = nil, dist = 0}
 end
 
 local keepBuffer = {}
-local scanRunning, lastScanClock, lastHrpPos, lastCleanup, lastInstantHit = false, 0, Vector3.zero, 0, 0
+local scanRunning, lastScanClock, lastHrpPos, lastCleanup = false, 0, Vector3.zero, 0
 local isMoving = false
 
 local function acquireHighlight(part, color)
@@ -109,7 +108,7 @@ local function acquireHighlight(part, color)
         hl = Instance.new("Highlight")
         hl.Name = "HyperHL"
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.FillTransparency = 0.28
+        hl.FillTransparency = 0.30
         hl.OutlineTransparency = 0
     end
     hl.FillColor = color
@@ -162,15 +161,9 @@ local function readStringAttribute(obj, key)
     return nil
 end
 
-local function readNumberAttribute(obj, key)
-    local ok, value = pcall(function() return obj:GetAttribute(key) end)
-    if ok and type(value) == "number" then return value end
-    return nil
-end
-
 local function getObjectName(obj)
     if not obj then return "" end
-    for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName", "Name"}) do
+    for _, key in ipairs({"ItemName", "CrystalName", "NexusName", "DisplayName", "ObjectName"}) do
         local value = readStringAttribute(obj, key)
         if value then return value end
     end
@@ -203,8 +196,7 @@ local function isCrystalTarget(obj)
             return true
         end
         if current:GetAttribute("Rarity") or current:GetAttribute("TierName")
-            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health")
-            or current:GetAttribute("Price") or current:GetAttribute("Value") then
+            or current:GetAttribute("CrystalWeight") or current:GetAttribute("Health") then
             return true
         end
         current = current.Parent
@@ -290,14 +282,7 @@ local function registerTarget(obj)
     local crystal = isCrystalTarget(obj) or isCrystalTarget(part)
     if nexus or crystal then
         local rarity = getRarityName(part)
-        local data = {
-            part = part,
-            nexus = nexus,
-            crystal = crystal,
-            rarity = rarity,
-            category = nil,
-            color = resolveColor(part, nexus, rarity)
-        }
+        local data = {part = part, nexus = nexus, crystal = crystal, rarity = rarity, category = nil, color = resolveColor(part, nexus, rarity)}
         targetRegistry[part] = data
         table.insert(targetList, data)
     end
@@ -323,7 +308,7 @@ task.spawn(function()
         if obj and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
             pcall(registerTarget, obj)
         end
-        if i % 500 == 0 then task.wait() end
+        if i % 450 == 0 then task.wait() end
     end
 end)
 
@@ -428,7 +413,7 @@ local function scanRealTime()
     end
 end
 
--- Instant Pickup (tetap sama)
+-- Instant Pickup
 task.spawn(function()
     while true do
         for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -439,91 +424,9 @@ task.spawn(function()
                 end)
             end
         end
-        task.wait(3.5)
+        task.wait(3.2)
     end
 end)
-
--- ====================== INSTANT HIT ======================
-local HEALTH_KEYS = {
-    "Health", "CrystalHealth", "HP", "Durability", "CurrentHealth",
-    "MaxHealth", "HitPoints", "OreHealth", "RockHealth", "NodeHealth"
-}
-
-local function forceInstantHit(obj)
-    if not obj or not obj.Parent then return end
-
-    -- 1. Attribute Health
-    for _, key in ipairs(HEALTH_KEYS) do
-        pcall(function()
-            local val = obj:GetAttribute(key)
-            if type(val) == "number" and val > 0 then
-                obj:SetAttribute(key, 0)
-            end
-        end)
-    end
-
-    -- 2. NumberValue / IntValue Health
-    for _, child in ipairs(obj:GetDescendants()) do
-        if child:IsA("NumberValue") or child:IsA("IntValue") then
-            local n = normalizeName(child.Name)
-            if n:find("health") or n:find("hp") or n:find("durability") or n:find("hit") then
-                pcall(function() child.Value = 0 end)
-            end
-        end
-    end
-
-    -- 3. Humanoid (jarang tapi ada)
-    local hum = obj:FindFirstChildOfClass("Humanoid")
-    if hum then
-        pcall(function()
-            hum.Health = 0
-            hum.MaxHealth = 0
-        end)
-    end
-
-    -- 4. Naik ke parent sedikit
-    local parent = obj.Parent
-    if parent and parent ~= Workspace then
-        for _, key in ipairs(HEALTH_KEYS) do
-            pcall(function()
-                local val = parent:GetAttribute(key)
-                if type(val) == "number" and val > 0 then
-                    parent:SetAttribute(key, 0)
-                end
-            end)
-        end
-    end
-end
-
-local function runInstantHit()
-    if not instantHitOn then return end
-    local character = localPlayer.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local origin = hrp.Position
-    local radiusSq = CONFIG.scanRadiusSq
-
-    for i = 1, #targetList do
-        local data = targetList[i]
-        local part = data.part
-        if part and part.Parent then
-            local pos = part.Position
-            local dx = pos.X - origin.X
-            local dz = pos.Z - origin.Z
-            if dx*dx + dz*dz <= radiusSq then
-                local dy = pos.Y - origin.Y
-                if dx*dx + dy*dy + dz*dz <= radiusSq then
-                    forceInstantHit(part)
-                    -- juga coba model-nya
-                    if part.Parent and part.Parent:IsA("Model") then
-                        forceInstantHit(part.Parent)
-                    end
-                end
-            end
-        end
-    end
-end
 
 RunService.Heartbeat:Connect(function()
     local now = tick()
@@ -544,13 +447,6 @@ RunService.Heartbeat:Connect(function()
             scanRunning = false
         end
     end
-
-    -- Instant Hit loop
-    if instantHitOn and (now - lastInstantHit) >= CONFIG.instantHitInterval then
-        lastInstantHit = now
-        pcall(runInstantHit)
-    end
-
     if now - lastCleanup > CONFIG.cleanupInterval then
         lastCleanup = now
         for i = #targetList, 1, -1 do
@@ -560,7 +456,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- ====================== ULTRA FPS EXTREME ======================
+-- Ultra FPS 80+
 local boosterBackup = {effects = {}, savedSettings = {}}
 local boosterEvent = nil
 
@@ -568,26 +464,22 @@ local function enableGameBooster()
     boosterBackup.globalShadows = Lighting.GlobalShadows
     boosterBackup.fogEnd = Lighting.FogEnd
     boosterBackup.brightness = Lighting.Brightness
-    boosterBackup.ambient = Lighting.Ambient
-    boosterBackup.outdoorAmbient = Lighting.OutdoorAmbient
 
     pcall(function()
         Lighting.GlobalShadows = false
         Lighting.FogEnd = 9e9
         Lighting.FogStart = 0
-        Lighting.Brightness = 1.1
+        Lighting.Brightness = 1.25
         Lighting.EnvironmentDiffuseScale = 0
         Lighting.EnvironmentSpecularScale = 0
-        Lighting.Ambient = Color3.fromRGB(40, 40, 40)
-        Lighting.OutdoorAmbient = Color3.fromRGB(40, 40, 40)
-        Lighting.Technology = Enum.Technology.Compatibility
+        Lighting.Ambient = Color3.fromRGB(50, 50, 50)
+        Lighting.OutdoorAmbient = Color3.fromRGB(50, 50, 50)
     end)
 
     table.clear(boosterBackup.effects)
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostProcessEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
-            or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect")
-            or effect:IsA("DepthOfFieldEffect") or effect:IsA("Atmosphere") then
+            or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
             boosterBackup.effects[effect] = effect.Enabled
             pcall(function() effect.Enabled = false end)
         end
@@ -603,7 +495,6 @@ local function enableGameBooster()
             terrain.WaterWaveSize = 0
             terrain.WaterWaveSpeed = 0
             terrain.WaterReflectance = 0
-            terrain.WaterTransparency = 1
         end)
     end
 
@@ -613,20 +504,16 @@ local function enableGameBooster()
             UserGameSettings.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
         end
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-        settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
     end)
 
     if boosterEvent then boosterEvent:Disconnect() end
     boosterEvent = Workspace.DescendantAdded:Connect(function(obj)
         if not boosterOn then return end
         if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-            or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles")
-            or obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+            or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
             pcall(function() obj.Enabled = false end)
         elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-            pcall(function()
-                obj.CastShadow = false
-            end)
+            pcall(function() obj.CastShadow = false end)
         end
     end)
 
@@ -635,14 +522,13 @@ local function enableGameBooster()
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if not boosterOn then break end
             if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-                or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles")
-                or obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+                or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
                 pcall(function() obj.Enabled = false end)
             elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
                 pcall(function() obj.CastShadow = false end)
             end
             count += 1
-            if count % 250 == 0 then task.wait() end
+            if count % 300 == 0 then task.wait() end
         end
     end)
 end
@@ -653,11 +539,8 @@ local function disableGameBooster()
         if boosterBackup.globalShadows ~= nil then Lighting.GlobalShadows = boosterBackup.globalShadows end
         if boosterBackup.fogEnd ~= nil then Lighting.FogEnd = boosterBackup.fogEnd end
         if boosterBackup.brightness ~= nil then Lighting.Brightness = boosterBackup.brightness end
-        if boosterBackup.ambient then Lighting.Ambient = boosterBackup.ambient end
-        if boosterBackup.outdoorAmbient then Lighting.OutdoorAmbient = boosterBackup.outdoorAmbient end
         Lighting.EnvironmentDiffuseScale = 1
         Lighting.EnvironmentSpecularScale = 1
-        Lighting.Technology = Enum.Technology.Future
     end)
     for effect, state in pairs(boosterBackup.effects) do
         if effect and effect.Parent then pcall(function() effect.Enabled = state end) end
@@ -677,7 +560,7 @@ local function disableGameBooster()
     end)
 end
 
--- Speed 2x
+-- Speed 2x Modern
 local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
 local speedConn, speedRenderConn = nil, nil
 
@@ -720,7 +603,7 @@ localPlayer.CharacterAdded:Connect(function()
     if speedOn then hookSpeed() end
 end)
 
--- ====================== GUI ======================
+-- GUI
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -732,7 +615,7 @@ screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 430, 0, 360) -- kembali ke original
+outer.Size = UDim2.new(0, 430, 0, 360)
 outer.Position = UDim2.new(0, 12, 0.5, -165)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
@@ -757,7 +640,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -52, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
-titleLabel.Text = "❄ Gec Mine Antarctica • V21.1 Clean"
+titleLabel.Text = "❄ Gec Mine Antarctica • V20.1 Clean"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 12
 titleLabel.Font = Enum.Font.GothamBold
@@ -830,7 +713,6 @@ rightCol.Size = UDim2.new(1, -74, 1, -46)
 rightCol.Position = UDim2.new(0, 66, 0, 34)
 rightCol.BackgroundTransparency = 1
 
--- ====================== RADAR PAGE ======================
 local radarPage = Instance.new("Frame", rightCol)
 radarPage.Size = UDim2.new(1, 0, 1, 0)
 radarPage.BackgroundTransparency = 1
@@ -865,7 +747,7 @@ radarToggleBtn.MouseButton1Click:Connect(function()
     setRadarVis(radarOn)
     refreshRadarToggle()
     if radarOn then
-        radarStatus.Text = "ANTARCTICA • 210M • 32 MARKERS • ON"
+        radarStatus.Text = "ANTARCTICA • 210M • 36 MARKERS • ON"
         lastScanClock = 0
         task.defer(scanRealTime)
     else
@@ -965,7 +847,6 @@ filterStatus.TextYAlignment = Enum.TextYAlignment.Top
 filterStatus.BackgroundTransparency = 1
 filterStatus.TextWrapped = true
 
--- ====================== SETTINGS PAGE ======================
 local settingsPage = Instance.new("Frame", rightCol)
 settingsPage.Size = UDim2.new(1, 0, 1, 0)
 settingsPage.BackgroundTransparency = 1
@@ -980,7 +861,6 @@ pTitle.Font = Enum.Font.GothamBold
 pTitle.TextXAlignment = Enum.TextXAlignment.Left
 pTitle.BackgroundTransparency = 1
 
--- Ultra FPS Card
 local boosterCard = Instance.new("Frame", settingsPage)
 boosterCard.Size = UDim2.new(1, 0, 0, 48)
 boosterCard.Position = UDim2.new(0, 0, 0, 20)
@@ -992,7 +872,7 @@ Instance.new("UICorner", boosterCard).CornerRadius = UDim.new(0, 7)
 local bInfoLabel = Instance.new("TextLabel", boosterCard)
 bInfoLabel.Size = UDim2.new(1, -70, 1, 0)
 bInfoLabel.Position = UDim2.new(0, 8, 0, 0)
-bInfoLabel.Text = "⚡ ULTRA FPS EXTREME\nGraphics + Lighting + Particles OFF"
+bInfoLabel.Text = "⚡ ULTRA FPS 80+\nGraphics Optimized • Cooler"
 bInfoLabel.TextColor3 = C.textMain
 bInfoLabel.TextSize = 8
 bInfoLabel.Font = Enum.Font.GothamBold
@@ -1024,52 +904,10 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Instant Hit Card
-local hitCard = Instance.new("Frame", settingsPage)
-hitCard.Size = UDim2.new(1, 0, 0, 48)
-hitCard.Position = UDim2.new(0, 0, 0, 76)
-hitCard.BackgroundColor3 = C.black
-hitCard.BackgroundTransparency = 0.2
-hitCard.BorderSizePixel = 0
-Instance.new("UICorner", hitCard).CornerRadius = UDim.new(0, 7)
-
-local hInfoLabel = Instance.new("TextLabel", hitCard)
-hInfoLabel.Size = UDim2.new(1, -70, 1, 0)
-hInfoLabel.Position = UDim2.new(0, 8, 0, 0)
-hInfoLabel.Text = "⚔ INSTANT HIT\nCrystal Health → 0 (langsung hancur)"
-hInfoLabel.TextColor3 = C.textMain
-hInfoLabel.TextSize = 8
-hInfoLabel.Font = Enum.Font.GothamBold
-hInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
-hInfoLabel.TextYAlignment = Enum.TextYAlignment.Center
-hInfoLabel.BackgroundTransparency = 1
-
-local hitToggleBtn = Instance.new("TextButton", hitCard)
-hitToggleBtn.Size = UDim2.new(0, 52, 0, 24)
-hitToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
-hitToggleBtn.Text = "HIT OFF"
-hitToggleBtn.TextColor3 = Color3.new(1, 1, 1)
-hitToggleBtn.TextSize = 7
-hitToggleBtn.Font = Enum.Font.GothamBold
-hitToggleBtn.BackgroundColor3 = C.red
-hitToggleBtn.BorderSizePixel = 0
-Instance.new("UICorner", hitToggleBtn).CornerRadius = UDim.new(0, 6)
-
-hitToggleBtn.MouseButton1Click:Connect(function()
-    instantHitOn = not instantHitOn
-    if instantHitOn then
-        hitToggleBtn.Text = "HIT ON"
-        hitToggleBtn.BackgroundColor3 = C.green
-    else
-        hitToggleBtn.Text = "HIT OFF"
-        hitToggleBtn.BackgroundColor3 = C.red
-    end
-end)
-
 local pInfo = Instance.new("TextLabel", settingsPage)
-pInfo.Position = UDim2.new(0, 0, 0, 138)
+pInfo.Position = UDim2.new(0, 0, 0, 80)
 pInfo.Size = UDim2.new(1, 0, 0, 40)
-pInfo.Text = "V21.1 Clean\nRadar • Speed 2x • Instant Pickup • Instant Hit • Ultra FPS"
+pInfo.Text = "V20.1 Clean\nRadar • Speed 2x • Instant Pickup • Ultra FPS 80+"
 pInfo.TextColor3 = C.textSub
 pInfo.TextSize = 8
 pInfo.Font = Enum.Font.Gotham
@@ -1177,4 +1015,4 @@ updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
 
-print("❄ GEC MINE ANTARCTICA V21.1 CLEAN LOADED ✔")
+print("❄ GEC MINE ANTARCTICA V20.1 CLEAN LOADED ✔")
