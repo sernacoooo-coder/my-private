@@ -1,9 +1,9 @@
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V4.01 (FIXED)
--- • 3D Round-Joystick Jetpack (Mobile fix — no drift)
--- • Strict AI Radar 200M (Max 30) — lighter scan
--- • Zero-Slip Slope Lock • Instant Interaction
--- • Battery Saver & Potato FPS
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V5.0 (FINAL ULTRA-CLEAN)
+-- • Radius Radar Strict 140M (Super Ringan & Instan Fast-Scan)
+-- • Zero-Lag FPS Optimizer (Bebas Lag Spike & Hemat Baterai)
+-- • Smooth Anti-Slip & Godmode Anti-Damage (Karakter Ringan/Lincah)
+-- • Instant Proximity Interaction & Lightweight Crystals (0.1)
 -- =================================================================
 
 local EXPECTED_KEY = "Jack"
@@ -29,35 +29,31 @@ pcall(function()
 end)
 
 local CONFIG = {
-	normalSpeed = 16,
-	boostMult = 3,
-	jetpackSpeed = 48,
-	radarIntervalIdle = 0.22,   -- lebih irit (was 0.12)
-	radarIntervalMove = 0.07,   -- tetap responsif (was 0.035)
-	moveThresholdSq = 1.2 * 1.2,
-	maxMarkers = 30,
-	scanRadius = 200,
-	scanRadiusSq = 200 * 200,
-	cleanupInterval = 4.0,      -- was 3.0
+	scanRadius = 140,
+	scanRadiusSq = 140 * 140,
+	radarIntervalIdle = 0.15,
+	radarIntervalMove = 0.05,
+	moveThresholdSq = 1.0,
+	maxMarkers = 25,
+	cleanupInterval = 3.0,
 	lightWeightValue = 0.1,
-	softFallMaxSpeed = -38,
-	voidY = -80,
-	groundFriction = 100,
-	ingestBatch = 180,          -- batch lebih kecil biar gak spike
+	safeFallVelocity = -35,
+	voidThresholdY = -70,
+	ingestBatch = 200,
 }
 
 local AI_WEIGHTS = {
 	Rarity = {
-		Mythic = 110, Exotic = 95, Legendary = 75,
-		Epic = 55, Rare = 35, Uncommon = 20, Common = 10
+		Mythic = 120, Exotic = 100, Legendary = 80,
+		Epic = 60, Rare = 40, Uncommon = 25, Common = 10
 	},
 	Nexus = {
-		["Void Nexus"] = 135,
-		["Solar Nexus"] = 125,
-		["Aether Nexus"] = 120
+		["Void Nexus"] = 150,
+		["Solar Nexus"] = 140,
+		["Aether Nexus"] = 130
 	},
-	FreshSpawnBoost = 45,
-	PathAngleFactor = 30,
+	FreshSpawnBoost = 50,
+	PathAngleFactor = 35,
 }
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
@@ -88,40 +84,47 @@ local CRYSTAL_COLORS = {
 	crystal = Color3.fromRGB(80, 210, 255),
 }
 local C = {
-	bg = Color3.fromRGB(10, 11, 15), black = Color3.fromRGB(16, 17, 22),
+	bg = Color3.fromRGB(12, 14, 18), black = Color3.fromRGB(18, 20, 26),
 	accent = Color3.fromRGB(88, 101, 242), green = Color3.fromRGB(87, 242, 135),
 	orange = Color3.fromRGB(254, 160, 60), purple = Color3.fromRGB(180, 80, 220),
 	red = Color3.fromRGB(237, 66, 69), cyan = Color3.fromRGB(0, 210, 255),
 	textMain = Color3.fromRGB(235, 238, 245), textSub = Color3.fromRGB(130, 136, 148),
 }
 
-local speedOn, radarOn, boosterOn, lightWeightOn, jetpackOn = false, false, false, false, false
+local radarOn = false
+local boosterOn = false
+local lightWeightOn = false
 local antiDamageOn = true
-local selectedRarities, selectedCategories, selectedNexus = {}, {}, {}
-local targetRegistry, targetList = {}, {}
-local activeMarkers = {}
-local highlightPool = table.create(CONFIG.maxMarkers + 4)
 
-for i = 1, CONFIG.maxMarkers + 4 do
+local selectedRarities = {}
+local selectedCategories = {}
+local selectedNexus = {}
+
+local targetRegistry = {}
+local targetList = {}
+local activeMarkers = {}
+
+local highlightPool = table.create(CONFIG.maxMarkers + 2)
+for i = 1, CONFIG.maxMarkers + 2 do
 	local hl = Instance.new("Highlight")
-	hl.Name = "HyperHL"
+	hl.Name = "QuantumHL"
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	hl.FillTransparency = 0.25
-	hl.OutlineTransparency = 0
+	hl.FillTransparency = 0.3
+	hl.OutlineTransparency = 0.1
 	hl.Enabled = false
 	highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 64
+local MAX_FOUND_BUFFER = 48
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
-	foundSlots[i] = {part = nil, data = nil, dist = 0, aiScore = 0}
+	foundSlots[i] = {part = nil, data = nil, distSq = 0, aiScore = 0}
 end
 
 local keepBuffer = {}
 local scanRunning, lastScanClock, lastHrpPos, lastCleanup = false, 0, Vector3.zero, 0
 local isMoving = false
-local lastSafeCFrame = nil
+local lastSafeGroundCFrame = nil
 local lastHealth = 100
 
 -- ==================== HIGHLIGHT POOL ====================
@@ -129,10 +132,10 @@ local function acquireHighlight(part, color)
 	local hl = table.remove(highlightPool)
 	if not hl or not hl.Parent then
 		hl = Instance.new("Highlight")
-		hl.Name = "HyperHL"
+		hl.Name = "QuantumHL"
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		hl.FillTransparency = 0.25
-		hl.OutlineTransparency = 0
+		hl.FillTransparency = 0.3
+		hl.OutlineTransparency = 0.1
 	end
 	hl.FillColor = color
 	hl.OutlineColor = color
@@ -162,7 +165,7 @@ local function clearAllMarkers()
 	table.clear(activeMarkers)
 end
 
--- ==================== STRING & TARGET UTILITIES ====================
+-- ==================== TARGET IDENTIFIER & CACHE ====================
 local function isForbiddenObject(obj)
 	if not obj then return true end
 	local char = localPlayer.Character
@@ -207,7 +210,7 @@ end
 local function resolveNexusName(obj)
 	if not obj then return nil end
 	local current, depth = obj, 0
-	while current and current ~= Workspace and depth < 6 do
+	while current and current ~= Workspace and depth < 5 do
 		local norm = normalizeName(getObjectName(current))
 		if norm:find("void nexus", 1, true) then return "Void Nexus"
 		elseif norm:find("solar nexus", 1, true) then return "Solar Nexus"
@@ -221,7 +224,7 @@ end
 local function isCrystalTarget(obj)
 	if not obj or isForbiddenObject(obj) then return false end
 	local current, depth = obj, 0
-	while current and current ~= Workspace and depth < 6 do
+	while current and current ~= Workspace and depth < 5 do
 		local name = normalizeName(getObjectName(current))
 		if name:find("crystal", 1, true) or name:find("cluster", 1, true)
 			or name:find("obsidian", 1, true) or name:find("ember", 1, true)
@@ -251,7 +254,7 @@ local RARITY_ALIAS_ORDER = {
 local function getRarityName(part)
 	if not part then return nil end
 	local current, depth = part, 0
-	while current and current ~= Workspace and depth < 6 do
+	while current and current ~= Workspace and depth < 5 do
 		local values = {
 			current:GetAttribute("Rarity"), current:GetAttribute("TierName"),
 			current:GetAttribute("Tier"), current:GetAttribute("RarityName"), getObjectName(current),
@@ -315,7 +318,7 @@ local function applyLightWeight(obj)
 	if not obj or not lightWeightOn then return end
 	pcall(function()
 		local current, depth = obj, 0
-		while current and current ~= Workspace and depth < 6 do
+		while current and current ~= Workspace and depth < 5 do
 			if current:GetAttribute("CrystalWeight") ~= nil then
 				current:SetAttribute("CrystalWeight", CONFIG.lightWeightValue)
 			end
@@ -329,8 +332,6 @@ local function applyLightWeight(obj)
 	end)
 end
 
-local scanRealTime
-
 local function registerTarget(obj)
 	if not obj or isForbiddenObject(obj) then return end
 	local ok, part = pcall(getWorldPart, obj)
@@ -340,12 +341,13 @@ local function registerTarget(obj)
 	if not (nexus or crystal) then return end
 
 	local rarity = getRarityName(part)
+	local category = getCrystalCategory(part)
 	local data = {
 		part = part,
 		nexus = nexus,
 		crystal = crystal,
 		rarity = rarity,
-		category = nil,
+		category = category,
 		color = resolveColor(part, nexus, rarity),
 		spawnTime = os.clock(),
 	}
@@ -359,7 +361,10 @@ local function unregisterTarget(part)
 	targetRegistry[part] = nil
 	releaseHighlight(part)
 	for i = #targetList, 1, -1 do
-		if targetList[i].part == part then table.remove(targetList, i) break end
+		if targetList[i].part == part then
+			table.remove(targetList, i)
+			break
+		end
 	end
 end
 
@@ -369,31 +374,12 @@ local function processPrompt(obj)
 	if not obj or not obj:IsA("ProximityPrompt") or processedPrompts[obj] then return end
 	processedPrompts[obj] = true
 	pcall(function()
-		if obj.HoldDuration and obj.HoldDuration > 0 then obj.HoldDuration = 0 end
+		obj.HoldDuration = 0
 		obj.RequiresLineOfSight = false
 	end)
 end
 
--- ==================== ULTRA BATTERY OPTIMIZER ====================
-local boosterBackup = { effects = {}, savedSettings = {} }
-
-local function stripLagObject(obj)
-	if not boosterOn or not obj then return end
-	if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-		or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
-		pcall(function() obj.Enabled = false end)
-	elseif obj:IsA("Decal") or obj:IsA("Texture") then
-		pcall(function() obj.Transparency = 1 end)
-	elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
-		pcall(function()
-			obj.CastShadow = false
-			obj.Material = Enum.Material.SmoothPlastic
-			obj.Reflectance = 0
-		end)
-	end
-end
-
--- Ingest lebih pelan (kurangi lag spike startup)
+-- Ingest Workspace
 task.spawn(function()
 	local ok, desc = pcall(function() return Workspace:GetDescendants() end)
 	if not ok or not desc then return end
@@ -406,7 +392,6 @@ task.spawn(function()
 			elseif obj:IsA("ProximityPrompt") then
 				pcall(processPrompt, obj)
 			end
-			if boosterOn then pcall(stripLagObject, obj) end
 		end
 		if i % batch == 0 then task.wait() end
 	end
@@ -421,7 +406,6 @@ Workspace.DescendantAdded:Connect(function(obj)
 		elseif obj:IsA("ProximityPrompt") then
 			pcall(processPrompt, obj)
 		end
-		if boosterOn then pcall(stripLagObject, obj) end
 	end)
 end)
 
@@ -429,40 +413,37 @@ Workspace.DescendantRemoving:Connect(function(obj)
 	if obj and obj:IsA("BasePart") then pcall(unregisterTarget, obj) end
 end)
 
--- ==================== AI RADAR ====================
+-- ==================== FAST AI RADAR (140M STRICT) ====================
 local function passesFilter(data)
 	if not data then return false end
 	if next(selectedRarities) == nil then return false end
 	if not data.rarity or not selectedRarities[data.rarity] then return false end
 	if next(selectedNexus) and (not data.nexus or not selectedNexus[data.nexus]) then return false end
-	if next(selectedCategories) then
-		if not data.category then data.category = getCrystalCategory(data.part) end
-		if not data.category or not selectedCategories[data.category] then return false end
-	end
+	if next(selectedCategories) and (not data.category or not selectedCategories[data.category]) then return false end
 	return true
 end
 
-local function calculateAIScore(data, dx, dy, dz, distSq, moveDir, lookVec, now)
+local function calculateAIScore(data, distSq, headingDir, dx, dz, now)
 	local dist = math.sqrt(distSq)
 	local baseScore = (data.nexus and AI_WEIGHTS.Nexus[data.nexus])
 		or (data.rarity and AI_WEIGHTS.Rarity[data.rarity])
 		or 10
-	local proximityScore = (1 - (dist / CONFIG.scanRadius)) * 60
+	local proximityScore = (1 - (dist / 140)) * 60
 	local freshBonus = 0
-	if data.spawnTime and (now - data.spawnTime) < 10 then
-		freshBonus = (1 - ((now - data.spawnTime) / 10)) * AI_WEIGHTS.FreshSpawnBoost
+	if data.spawnTime and (now - data.spawnTime) < 8 then
+		freshBonus = (1 - ((now - data.spawnTime) / 8)) * AI_WEIGHTS.FreshSpawnBoost
 	end
 	local headingBonus = 0
-	local headingDir = moveDir.Magnitude > 0.1 and moveDir or lookVec
-	local targetDirXZ = Vector3.new(dx, 0, dz)
-	if targetDirXZ.Magnitude > 0.1 then
-		local dot = headingDir:Dot(targetDirXZ.Unit)
+	local magXZ = dx * dx + dz * dz
+	if magXZ > 0.04 and headingDir.Magnitude > 0.1 then
+		local invMag = 1 / math.sqrt(magXZ)
+		local dot = headingDir.X * (dx * invMag) + headingDir.Z * (dz * invMag)
 		if dot > 0 then headingBonus = dot * AI_WEIGHTS.PathAngleFactor end
 	end
 	return baseScore + proximityScore + freshBonus + headingBonus
 end
 
-scanRealTime = function()
+local function scanRealTime()
 	if not radarOn or next(selectedRarities) == nil then
 		if next(activeMarkers) then clearAllMarkers() end
 		return
@@ -474,9 +455,10 @@ scanRealTime = function()
 
 	local origin = hrp.Position
 	local ox, oy, oz = origin.X, origin.Y, origin.Z
+	local radius = 140
 	local radiusSq = CONFIG.scanRadiusSq
 	local moveDir = hum and hum.MoveDirection or Vector3.zero
-	local lookVec = hrp.CFrame.LookVector
+	local headingDir = moveDir.Magnitude > 0.1 and moveDir or hrp.CFrame.LookVector
 	local now = os.clock()
 
 	local foundCount = 0
@@ -488,16 +470,23 @@ scanRealTime = function()
 		local part = data and data.part
 		if part and part.Parent then
 			local pos = part.Position
-			local dx, dy, dz = pos.X - ox, pos.Y - oy, pos.Z - oz
-			local distSq = dx * dx + dy * dy + dz * dz
-			if distSq <= radiusSq and passesFilter(data) then
-				foundCount += 1
-				if foundCount <= maxBuf then
-					local slot = foundSlots[foundCount]
-					slot.part = part
-					slot.data = data
-					slot.dist = distSq
-					slot.aiScore = calculateAIScore(data, dx, dy, dz, distSq, moveDir, lookVec, now)
+			local dx = pos.X - ox
+			local dz = pos.Z - oz
+			-- Manhattan Culling (Super Fast early exit)
+			if math.abs(dx) <= radius and math.abs(dz) <= radius then
+				local dy = pos.Y - oy
+				if math.abs(dy) <= radius then
+					local distSq = dx * dx + dy * dy + dz * dz
+					if distSq <= radiusSq and passesFilter(data) then
+						foundCount += 1
+						if foundCount <= maxBuf then
+							local slot = foundSlots[foundCount]
+							slot.part = part
+							slot.data = data
+							slot.distSq = distSq
+							slot.aiScore = calculateAIScore(data, distSq, headingDir, dx, dz, now)
+						end
+					end
 				end
 			end
 		end
@@ -546,142 +535,36 @@ scanRealTime = function()
 	end
 
 	for i = 1, actualFound do
-		foundSlots[i].dist = 0
-		foundSlots[i].aiScore = 0
-		foundSlots[i].part = nil
-		foundSlots[i].data = nil
+		local s = foundSlots[i]
+		s.distSq = 0
+		s.aiScore = 0
+		s.part = nil
+		s.data = nil
 	end
 end
 
--- ==================== SPEED MODULE ====================
-local function targetSpeed() return CONFIG.normalSpeed * CONFIG.boostMult end
-local lastSpeedApply = 0
-local speedConn = nil
-
-local function applySpeedSafe(hum)
-	if not hum or not speedOn or jetpackOn then return end
-	local want = targetSpeed()
-	if math.abs(hum.WalkSpeed - want) > 0.5 then
-		pcall(function() hum.WalkSpeed = want end)
-	end
-end
-
-local function hookSpeed()
-	if speedConn then speedConn:Disconnect() speedConn = nil end
-	local char = localPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not hum then return end
-	speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-		if not speedOn or jetpackOn then return end
-		local now = os.clock()
-		if now - lastSpeedApply < 0.08 then return end
-		lastSpeedApply = now
-		applySpeedSafe(hum)
-	end)
-	applySpeedSafe(hum)
-end
-
-local function unhookSpeed()
-	if speedConn then speedConn:Disconnect() speedConn = nil end
-	local char = localPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hum then pcall(function() hum.WalkSpeed = CONFIG.normalSpeed end) end
-end
-
--- ==================== 3D JETPACK (MOBILE FIXED) ====================
-local jetpackBV = nil
-local jetpackInputVector = Vector2.zero
-local jetpackActiveLoop = nil
-local stickTouchId = nil -- track touch yang pegang stick (anti geser)
-
-local function createJetpackPhysics(hrp)
-	if jetpackBV and jetpackBV.Parent then jetpackBV:Destroy() end
-	jetpackBV = Instance.new("BodyVelocity")
-	jetpackBV.Name = "QuantumJetpackBV"
-	jetpackBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-	jetpackBV.Velocity = Vector3.zero
-	jetpackBV.Parent = hrp
-end
-
-local function removeJetpackPhysics()
-	if jetpackBV then
-		pcall(function() jetpackBV:Destroy() end)
-		jetpackBV = nil
-	end
-end
-
-local function enableJetpack()
-	jetpackOn = true
-	local char = localPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not hrp or not hum then return end
-
-	hum.PlatformStand = true
-	createJetpackPhysics(hrp)
-	lastSafeCFrame = hrp.CFrame
-
-	if jetpackActiveLoop then jetpackActiveLoop:Disconnect() end
-	jetpackActiveLoop = RunService.PreSimulation:Connect(function()
-		if not jetpackOn or not hrp or not hrp.Parent then return end
-		lastSafeCFrame = hrp.CFrame
-
-		local camCF = camera.CFrame
-		local look = camCF.LookVector
-		local right = camCF.RightVector
-		local moveDirection = Vector3.zero
-		if jetpackInputVector.Magnitude > 0.05 then
-			moveDirection = (look * jetpackInputVector.Y) + (right * jetpackInputVector.X)
-		end
-		if moveDirection.Magnitude > 0.05 then
-			jetpackBV.Velocity = moveDirection.Unit * CONFIG.jetpackSpeed
-		else
-			jetpackBV.Velocity = Vector3.zero
-		end
-	end)
-end
-
-local function disableJetpack()
-	jetpackOn = false
-	if jetpackActiveLoop then jetpackActiveLoop:Disconnect() jetpackActiveLoop = nil end
-	removeJetpackPhysics()
-	jetpackInputVector = Vector2.zero
-	stickTouchId = nil
-
-	local char = localPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hrp and hum then
-		lastSafeCFrame = hrp.CFrame
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hum.PlatformStand = false
-		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-	end
-	if speedOn then hookSpeed() end
-end
-
--- ==================== ANTI-SLIP & ANTI-DAMAGE ====================
+-- ==================== SMOOTH ANTI-SLIP & ANTI-DAMAGE ====================
 local antiConn = {}
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
+local groundRayParams = RaycastParams.new()
+groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
 
 local function clearAntiConns()
 	for _, c in ipairs(antiConn) do pcall(function() c:Disconnect() end) end
 	table.clear(antiConn)
 end
 
-local function applyAntiSlipProperties(char, hum)
+local function applyCharacterPhysics(char, hum)
 	if not char then return end
-	for _, part in ipairs(char:GetDescendants()) do
-		if part:IsA("BasePart") then
-			pcall(function()
-				part.CustomPhysicalProperties = PhysicalProperties.new(2.0, CONFIG.groundFriction, 0, 100, 100)
-			end)
-		end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		-- Physics alami: tidak berat, tidak seret
+		pcall(function()
+			hrp.CustomPhysicalProperties = PhysicalProperties.new(1.0, 1.2, 0, 10, 10)
+		end)
 	end
 	if hum then
 		pcall(function()
-			hum.MaxSlopeAngle = 89.5
+			hum.MaxSlopeAngle = 89.5 -- Bebas daki tebing tanpa terpeleset
 			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 		end)
@@ -691,59 +574,54 @@ end
 local function hookAntiDamage(char)
 	clearAntiConns()
 	if not char then return end
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:WaitForChild("Humanoid", 3)
+	local hrp = char:WaitForChild("HumanoidRootPart", 3)
 	if not hum or not hrp then return end
 
 	lastHealth = hum.Health
-	lastSafeCFrame = hrp.CFrame
-	applyAntiSlipProperties(char, hum)
+	lastSafeGroundCFrame = hrp.CFrame
+	applyCharacterPhysics(char, hum)
 
-	table.insert(antiConn, hum.HealthChanged:Connect(function(h)
+	-- Godmode: Cegah HP berkurang
+	table.insert(antiConn, hum.HealthChanged:Connect(function(newHealth)
 		if not antiDamageOn then return end
-		if h < lastHealth and h > 0 then
-			pcall(function() hum.Health = math.max(lastHealth, hum.MaxHealth) end)
+		if newHealth < lastHealth and newHealth > 0 then
+			pcall(function() hum.Health = hum.MaxHealth end)
 		end
-		if h > lastHealth then lastHealth = h end
-		if hum.Health >= hum.MaxHealth then lastHealth = hum.MaxHealth end
+		lastHealth = math.max(hum.Health, hum.MaxHealth)
 	end))
 
+	-- Physics Tick: Anti Void & Anti Fall-Damage Softlanding
 	table.insert(antiConn, RunService.PreSimulation:Connect(function()
-		if not antiDamageOn or jetpackOn then return end
+		if not antiDamageOn then return end
 		local c = localPlayer.Character
 		local h = c and c:FindFirstChildOfClass("Humanoid")
 		local root = c and c:FindFirstChild("HumanoidRootPart")
 		if not h or not root then return end
 
-		local state = h:GetState()
 		local pos = root.Position
 		local vel = root.AssemblyLinearVelocity
-		local moveDir = h.MoveDirection
 
-		rayParams.FilterDescendantsInstances = {c}
-		local groundRay = Workspace:Raycast(pos, Vector3.new(0, -5.5, 0), rayParams)
-		local isGrounded = groundRay ~= nil or h.FloorMaterial ~= Enum.Material.Air
+		-- Deteksi pijakan tanah
+		groundRayParams.FilterDescendantsInstances = {c}
+		local rayResult = Workspace:Raycast(pos, Vector3.new(0, -6, 0), groundRayParams)
+		local isGrounded = rayResult ~= nil or h.FloorMaterial ~= Enum.Material.Air
 
 		if isGrounded then
-			if vel.Y > -5 then lastSafeCFrame = root.CFrame end
-			if moveDir.Magnitude < 0.05 then
-				root.AssemblyLinearVelocity = Vector3.new(0, math.clamp(vel.Y, -2, 2), 0)
-			else
-				local targetSpeedVal = speedOn and targetSpeed() or CONFIG.normalSpeed
-				local desired = moveDir * targetSpeedVal
-				root.AssemblyLinearVelocity = Vector3.new(desired.X, vel.Y, desired.Z)
+			if vel.Y > -4 then
+				lastSafeGroundCFrame = root.CFrame
+			end
+		else
+			-- Redam kecepatan jatuh bebas agar saat bentur tanah tidak instakill
+			if vel.Y < CONFIG.safeFallVelocity then
+				root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.safeFallVelocity, vel.Z)
 			end
 		end
 
-		if state == Enum.HumanoidStateType.Freefall and not isGrounded then
-			if vel.Y < CONFIG.softFallMaxSpeed then
-				root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.softFallMaxSpeed, vel.Z)
-			end
-		end
-
-		if pos.Y < CONFIG.voidY and lastSafeCFrame then
+		-- Selamatkan dari jurang/void
+		if pos.Y < CONFIG.voidThresholdY and lastSafeGroundCFrame then
 			pcall(function()
-				root.CFrame = lastSafeCFrame + Vector3.new(0, 3, 0)
+				root.CFrame = lastSafeGroundCFrame + Vector3.new(0, 3, 0)
 				root.AssemblyLinearVelocity = Vector3.zero
 				h:ChangeState(Enum.HumanoidStateType.Running)
 			end)
@@ -753,31 +631,25 @@ end
 
 local function enableAntiDamage()
 	antiDamageOn = true
-	local char = localPlayer.Character
-	if char then hookAntiDamage(char) end
+	if localPlayer.Character then hookAntiDamage(localPlayer.Character) end
 end
 
 local function disableAntiDamage()
 	antiDamageOn = false
 	clearAntiConns()
 	local char = localPlayer.Character
-	if char then
-		for _, part in ipairs(char:GetDescendants()) do
-			if part:IsA("BasePart") then
-				pcall(function() part.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.3, 0.5) end)
-			end
-		end
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		pcall(function() hrp.CustomPhysicalProperties = nil end)
 	end
 end
 
 localPlayer.CharacterAdded:Connect(function(char)
-	task.wait(0.35)
-	if jetpackOn then disableJetpack() end
-	if speedOn then hookSpeed() end
+	task.wait(0.3)
 	if antiDamageOn then hookAntiDamage(char) end
 end)
 
--- Heartbeat radar (interval lebih irit)
+-- Heartbeat Radar Engine
 RunService.Heartbeat:Connect(function()
 	local now = os.clock()
 	if radarOn and not scanRunning then
@@ -809,28 +681,30 @@ RunService.Heartbeat:Connect(function()
 	end
 end)
 
--- ==================== POTATO FPS ====================
+-- ==================== CLEAN POTATO FPS OPTIMIZER ====================
+local boosterBackup = { effects = {}, savedSettings = {} }
+
 local function enableGameBooster()
 	boosterBackup.globalShadows = Lighting.GlobalShadows
 	boosterBackup.fogEnd = Lighting.FogEnd
 	boosterBackup.brightness = Lighting.Brightness
+
 	pcall(function()
 		Lighting.GlobalShadows = false
 		Lighting.FogEnd = 9e9
-		Lighting.FogStart = 0
-		Lighting.Brightness = 1.5
-		Lighting.EnvironmentDiffuseScale = 0
-		Lighting.EnvironmentSpecularScale = 0
+		Lighting.Brightness = 1.2
 	end)
+
 	table.clear(boosterBackup.effects)
 	for _, effect in ipairs(Lighting:GetChildren()) do
 		if effect:IsA("PostProcessEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
 			or effect:IsA("ColorCorrectionEffect") or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect")
-			or effect:IsA("Atmosphere") or effect:IsA("Clouds") or effect:IsA("Sky") then
+			or effect:IsA("Atmosphere") or effect:IsA("Clouds") then
 			boosterBackup.effects[effect] = effect.Enabled
 			pcall(function() effect.Enabled = false end)
 		end
 	end
+
 	local terrain = Workspace:FindFirstChildOfClass("Terrain")
 	if terrain then
 		boosterBackup.terrainDecoration = terrain.Decoration
@@ -839,9 +713,9 @@ local function enableGameBooster()
 			terrain.WaterWaveSize = 0
 			terrain.WaterWaveSpeed = 0
 			terrain.WaterReflectance = 0
-			terrain.WaterTransparency = 0
 		end)
 	end
+
 	pcall(function()
 		if UserGameSettings then
 			boosterBackup.savedSettings.SavedQualityLevel = UserGameSettings.SavedQualityLevel
@@ -856,8 +730,6 @@ local function disableGameBooster()
 		if boosterBackup.globalShadows ~= nil then Lighting.GlobalShadows = boosterBackup.globalShadows end
 		if boosterBackup.fogEnd ~= nil then Lighting.FogEnd = boosterBackup.fogEnd end
 		if boosterBackup.brightness ~= nil then Lighting.Brightness = boosterBackup.brightness end
-		Lighting.EnvironmentDiffuseScale = 1
-		Lighting.EnvironmentSpecularScale = 1
 	end)
 	for effect, state in pairs(boosterBackup.effects) do
 		if effect and effect.Parent then pcall(function() effect.Enabled = state end) end
@@ -873,7 +745,7 @@ local function disableGameBooster()
 	end)
 end
 
--- ==================== GUI ====================
+-- ==================== GUI INTERFACE ====================
 local old = playerGui:FindFirstChild("GecMineAntarctica") or playerGui:FindFirstChild("EngineGUI")
 if old then old:Destroy() end
 
@@ -885,18 +757,18 @@ screenGui.DisplayOrder = 9999
 screenGui.Parent = playerGui
 
 local outer = Instance.new("Frame", screenGui)
-outer.Size = UDim2.new(0, 440, 0, 390)
-outer.Position = UDim2.new(0, 15, 0.5, -195)
+outer.Size = UDim2.new(0, 420, 0, 360)
+outer.Position = UDim2.new(0, 20, 0.5, -180)
 outer.BackgroundColor3 = C.bg
 outer.BorderSizePixel = 0
 outer.Active = true
 Instance.new("UICorner", outer).CornerRadius = UDim.new(0, 14)
-Instance.new("UIStroke", outer).Color = Color3.fromRGB(40, 42, 54)
+Instance.new("UIStroke", outer).Color = Color3.fromRGB(40, 44, 58)
 
 local titleBar = Instance.new("Frame", outer)
-titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.Size = UDim2.new(1, 0, 0, 32)
 titleBar.BackgroundColor3 = C.accent
-titleBar.BackgroundTransparency = 0.2
+titleBar.BackgroundTransparency = 0.15
 titleBar.BorderSizePixel = 0
 Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 14)
 
@@ -904,13 +776,13 @@ local tbFix = Instance.new("Frame", titleBar)
 tbFix.Size = UDim2.new(1, 0, 0, 12)
 tbFix.Position = UDim2.new(0, 0, 1, -12)
 tbFix.BackgroundColor3 = C.accent
-tbFix.BackgroundTransparency = 0.2
+tbFix.BackgroundTransparency = 0.15
 tbFix.BorderSizePixel = 0
 
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -55, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "❄ GEC MINE ANTARCTICA • V4.01 FIXED"
+titleLabel.Text = "❄ GEC MINE ANTARCTICA • HYPERDRIVE V5.0"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 11
 titleLabel.Font = Enum.Font.GothamBold
@@ -928,14 +800,15 @@ minBtn.TextSize = 10
 minBtn.BorderSizePixel = 0
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
 
+-- Sidebar Tabs (Clean 2 Menu: Radar & Settings)
 local leftCol = Instance.new("Frame", outer)
-leftCol.Size = UDim2.new(0, 50, 1, -40)
-leftCol.Position = UDim2.new(0, 6, 0, 34)
+leftCol.Size = UDim2.new(0, 48, 1, -42)
+leftCol.Position = UDim2.new(0, 6, 0, 36)
 leftCol.BackgroundTransparency = 1
 
 local function makeTabButton(yPos, icon, gradA, gradB)
 	local btn = Instance.new("TextButton", leftCol)
-	btn.Size = UDim2.new(1, 0, 0, 42)
+	btn.Size = UDim2.new(1, 0, 0, 44)
 	btn.Position = UDim2.new(0, 0, 0, yPos)
 	btn.Text = icon
 	btn.TextColor3 = Color3.new(1, 1, 1)
@@ -950,6 +823,7 @@ local function makeTabButton(yPos, icon, gradA, gradB)
 	local grad = Instance.new("UIGradient", btn)
 	grad.Color = ColorSequence.new(gradB, gradB)
 	grad.Transparency = NumberSequence.new(0.85)
+
 	local function setVisual(on)
 		if on then
 			grad.Color = ColorSequence.new(gradA, gradB)
@@ -964,41 +838,39 @@ local function makeTabButton(yPos, icon, gradA, gradB)
 	return btn, setVisual
 end
 
-local speedBtn, setSpeedVis = makeTabButton(0, "⚡", C.accent, C.cyan)
-local jetpackBtn, setJetpackVis = makeTabButton(48, "🚀", C.purple, C.orange)
-local radarBtn, setRadarVis = makeTabButton(96, "◎", C.orange, C.red)
-local settingsBtn, setSettingsVis = makeTabButton(144, "⚙", C.green, C.cyan)
+local radarBtn, setRadarVis = makeTabButton(0, "◎", C.orange, C.red)
+local settingsBtn, setSettingsVis = makeTabButton(52, "⚙", C.green, C.cyan)
 
 local divider = Instance.new("Frame", outer)
-divider.Size = UDim2.new(0, 1, 1, -44)
-divider.Position = UDim2.new(0, 62, 0, 36)
-divider.BackgroundColor3 = Color3.fromRGB(30, 32, 42)
+divider.Size = UDim2.new(0, 1, 1, -46)
+divider.Position = UDim2.new(0, 60, 0, 38)
+divider.BackgroundColor3 = Color3.fromRGB(32, 35, 46)
 divider.BorderSizePixel = 0
 
 local rightCol = Instance.new("Frame", outer)
-rightCol.Size = UDim2.new(1, -74, 1, -44)
-rightCol.Position = UDim2.new(0, 68, 0, 36)
+rightCol.Size = UDim2.new(1, -70, 1, -44)
+rightCol.Position = UDim2.new(0, 66, 0, 36)
 rightCol.BackgroundTransparency = 1
 
--- RADAR PAGE
+-- ==================== TAB 1: RADAR PAGE ====================
 local radarPage = Instance.new("Frame", rightCol)
 radarPage.Size = UDim2.new(1, 0, 1, 0)
 radarPage.BackgroundTransparency = 1
 radarPage.Visible = true
 
 local fTitle = Instance.new("TextLabel", radarPage)
-fTitle.Size = UDim2.new(1, -60, 0, 14)
-fTitle.Text = "FILTER RARITIES (MAX 30 • 200M STRICT)"
+fTitle.Size = UDim2.new(1, -70, 0, 16)
+fTitle.Text = "STRICT 140M RADAR (FAST SCAN)"
 fTitle.TextColor3 = C.purple
-fTitle.TextSize = 9
+fTitle.TextSize = 9.5
 fTitle.Font = Enum.Font.GothamBold
 fTitle.TextXAlignment = Enum.TextXAlignment.Left
 fTitle.BackgroundTransparency = 1
 
 local radarStatus
 local radarToggleBtn = Instance.new("TextButton", radarPage)
-radarToggleBtn.Size = UDim2.new(0, 56, 0, 16)
-radarToggleBtn.Position = UDim2.new(1, -56, 0, -2)
+radarToggleBtn.Size = UDim2.new(0, 64, 0, 18)
+radarToggleBtn.Position = UDim2.new(1, -64, 0, -1)
 radarToggleBtn.TextColor3 = Color3.new(1, 1, 1)
 radarToggleBtn.TextSize = 8
 radarToggleBtn.Font = Enum.Font.GothamBold
@@ -1015,18 +887,18 @@ radarToggleBtn.MouseButton1Click:Connect(function()
 	setRadarVis(radarOn)
 	refreshRadarToggle()
 	if radarOn then
-		radarStatus.Text = "AI 200M RADAR • MAX 30 TARGETS • ON"
+		radarStatus.Text = "AI 140M RADAR • RUNNING"
 		lastScanClock = 0
 		task.defer(function() pcall(scanRealTime) end)
 	else
-		radarStatus.Text = "AI 200M RADAR • OFF"
+		radarStatus.Text = "AI 140M RADAR • OFF"
 		clearAllMarkers()
 	end
 end)
 
 local catScroll = Instance.new("ScrollingFrame", radarPage)
-catScroll.Size = UDim2.new(1, 0, 0, 48)
-catScroll.Position = UDim2.new(0, 0, 0, 16)
+catScroll.Size = UDim2.new(1, 0, 0, 68)
+catScroll.Position = UDim2.new(0, 0, 0, 22)
 catScroll.BackgroundTransparency = 1
 catScroll.BorderSizePixel = 0
 catScroll.ScrollingDirection = Enum.ScrollingDirection.XY
@@ -1034,7 +906,7 @@ catScroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
 catScroll.ScrollBarThickness = 2
 
 local catGrid = Instance.new("UIGridLayout", catScroll)
-catGrid.CellSize = UDim2.new(0, 58, 0, 14)
+catGrid.CellSize = UDim2.new(0, 64, 0, 18)
 catGrid.CellPadding = UDim2.new(0, 3, 0, 3)
 
 local toggleButtons = {}
@@ -1044,7 +916,7 @@ local function makeFilterButton(name, color, getState, setState)
 	local b = Instance.new("TextButton", catScroll)
 	b.Text = name
 	b.TextColor3 = color
-	b.TextSize = 7.5
+	b.TextSize = 8
 	b.Font = Enum.Font.GothamBold
 	b.BackgroundColor3 = C.black
 	b.BorderSizePixel = 0
@@ -1079,9 +951,9 @@ for _, category in ipairs(CATEGORIES) do
 end
 
 radarStatus = Instance.new("TextLabel", radarPage)
-radarStatus.Size = UDim2.new(1, 0, 0, 20)
-radarStatus.Position = UDim2.new(0, 0, 0, 70)
-radarStatus.Text = "AI 200M RADAR • OFF"
+radarStatus.Size = UDim2.new(1, 0, 0, 22)
+radarStatus.Position = UDim2.new(0, 0, 0, 96)
+radarStatus.Text = "AI 140M RADAR • OFF"
 radarStatus.TextColor3 = C.textMain
 radarStatus.TextSize = 8.5
 radarStatus.Font = Enum.Font.GothamBold
@@ -1092,8 +964,8 @@ Instance.new("UICorner", radarStatus).CornerRadius = UDim.new(0, 6)
 Instance.new("UIPadding", radarStatus).PaddingLeft = UDim.new(0, 6)
 
 local resetBtn = Instance.new("TextButton", radarPage)
-resetBtn.Size = UDim2.new(1, 0, 0, 20)
-resetBtn.Position = UDim2.new(0, 0, 0, 94)
+resetBtn.Size = UDim2.new(1, 0, 0, 22)
+resetBtn.Position = UDim2.new(0, 0, 0, 122)
 resetBtn.Text = "↺ RESET ALL FILTERS"
 resetBtn.TextColor3 = Color3.new(1, 1, 1)
 resetBtn.BackgroundColor3 = C.red
@@ -1104,7 +976,7 @@ Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 6)
 
 local filterStatus = Instance.new("TextLabel", radarPage)
 filterStatus.Size = UDim2.new(1, 0, 0, 32)
-filterStatus.Position = UDim2.new(0, 0, 0, 118)
+filterStatus.Position = UDim2.new(0, 0, 0, 148)
 filterStatus.Text = ""
 filterStatus.TextColor3 = C.green
 filterStatus.TextSize = 8.5
@@ -1114,15 +986,15 @@ filterStatus.TextYAlignment = Enum.TextYAlignment.Top
 filterStatus.BackgroundTransparency = 1
 filterStatus.TextWrapped = true
 
--- SETTINGS PAGE
+-- ==================== TAB 2: SETTINGS PAGE ====================
 local settingsPage = Instance.new("Frame", rightCol)
 settingsPage.Size = UDim2.new(1, 0, 1, 0)
 settingsPage.BackgroundTransparency = 1
 settingsPage.Visible = false
 
 local pTitle = Instance.new("TextLabel", settingsPage)
-pTitle.Size = UDim2.new(1, 0, 0, 14)
-pTitle.Text = "⚙ QUANTUM PERFORMANCE & PHYSICS"
+pTitle.Size = UDim2.new(1, 0, 0, 16)
+pTitle.Text = "⚙ SYSTEM OPTIMIZER & PHYSICS"
 pTitle.TextColor3 = C.green
 pTitle.TextSize = 9.5
 pTitle.Font = Enum.Font.GothamBold
@@ -1131,13 +1003,14 @@ pTitle.BackgroundTransparency = 1
 
 local function makeSettingCard(parent, y, title, subtitle)
 	local card = Instance.new("Frame", parent)
-	card.Size = UDim2.new(1, 0, 0, 40)
+	card.Size = UDim2.new(1, 0, 0, 44)
 	card.Position = UDim2.new(0, 0, 0, y)
 	card.BackgroundColor3 = C.black
 	card.BorderSizePixel = 0
 	Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+
 	local info = Instance.new("TextLabel", card)
-	info.Size = UDim2.new(1, -65, 1, 0)
+	info.Size = UDim2.new(1, -70, 1, 0)
 	info.Position = UDim2.new(0, 8, 0, 0)
 	info.Text = title .. "\n" .. subtitle
 	info.TextColor3 = C.textMain
@@ -1146,12 +1019,13 @@ local function makeSettingCard(parent, y, title, subtitle)
 	info.TextXAlignment = Enum.TextXAlignment.Left
 	info.TextYAlignment = Enum.TextYAlignment.Center
 	info.BackgroundTransparency = 1
+
 	local btn = Instance.new("TextButton", card)
-	btn.Size = UDim2.new(0, 52, 0, 20)
-	btn.Position = UDim2.new(1, -58, 0.5, -10)
+	btn.Size = UDim2.new(0, 56, 0, 22)
+	btn.Position = UDim2.new(1, -62, 0.5, -11)
 	btn.Text = "OFF"
 	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.TextSize = 7.5
+	btn.TextSize = 8
 	btn.Font = Enum.Font.GothamBold
 	btn.BackgroundColor3 = C.red
 	btn.BorderSizePixel = 0
@@ -1159,7 +1033,7 @@ local function makeSettingCard(parent, y, title, subtitle)
 	return btn
 end
 
-local boosterToggleBtn = makeSettingCard(settingsPage, 16, "⚡ ULTRA FPS & BATTERY SAVER", "Potato Mode • Zero Lag Spike")
+local boosterToggleBtn = makeSettingCard(settingsPage, 22, "⚡ POTATO FPS (ZERO SPIKE)", "Matikan Efek & Hemat Baterai")
 boosterToggleBtn.Text = "BOOST OFF"
 boosterToggleBtn.MouseButton1Click:Connect(function()
 	boosterOn = not boosterOn
@@ -1174,7 +1048,7 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local weightToggleBtn = makeSettingCard(settingsPage, 60, "🪶 LIGHTWEIGHT CRYSTALS", "CrystalWeight = 0.1")
+local weightToggleBtn = makeSettingCard(settingsPage, 72, "🪶 LIGHTWEIGHT CRYSTALS", "Set Weight Crystal = 0.1")
 weightToggleBtn.Text = "LIGHT OFF"
 weightToggleBtn.MouseButton1Click:Connect(function()
 	lightWeightOn = not lightWeightOn
@@ -1190,7 +1064,7 @@ weightToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local antiToggleBtn = makeSettingCard(settingsPage, 104, "🛡 ANTI DAMAGE & 100% SLOPE LOCK", "Tebing Curam Es Bebas Luncur")
+local antiToggleBtn = makeSettingCard(settingsPage, 122, "🛡 ANTI DAMAGE & ANTI SLIP", "Kebal Jatuh, Anti-Void & Daki Tebing")
 antiToggleBtn.Text = "ANTI ON"
 antiToggleBtn.BackgroundColor3 = C.green
 antiToggleBtn.MouseButton1Click:Connect(function()
@@ -1205,173 +1079,22 @@ antiToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- ==================== JETPACK JOYSTICK (FIXED MOBILE) ====================
--- Frame joystick TIDAK di-drag saat stick dipakai
-local joystickFrame = Instance.new("Frame", screenGui)
-joystickFrame.Size = UDim2.new(0, 120, 0, 120)
-joystickFrame.Position = UDim2.new(1, -145, 1, -155)
-joystickFrame.BackgroundColor3 = Color3.fromRGB(15, 18, 26)
-joystickFrame.BackgroundTransparency = 0.3
-joystickFrame.BorderSizePixel = 0
-joystickFrame.Visible = false
-joystickFrame.Active = true
-Instance.new("UICorner", joystickFrame).CornerRadius = UDim.new(1, 0)
-local jStroke = Instance.new("UIStroke", joystickFrame)
-jStroke.Color = C.cyan
-jStroke.Thickness = 2
-
--- Handle kecil di atas untuk GESER POSISI joystick (bukan whole frame)
-local dragHandle = Instance.new("TextButton", joystickFrame)
-dragHandle.Size = UDim2.new(1, 0, 0, 18)
-dragHandle.Position = UDim2.new(0, 0, 0, -22)
-dragHandle.BackgroundColor3 = C.accent
-dragHandle.BackgroundTransparency = 0.3
-dragHandle.Text = "⋮⋮ geser"
-dragHandle.TextColor3 = Color3.new(1,1,1)
-dragHandle.TextSize = 9
-dragHandle.Font = Enum.Font.GothamBold
-dragHandle.BorderSizePixel = 0
-Instance.new("UICorner", dragHandle).CornerRadius = UDim.new(0, 6)
-
-local jCenter = Instance.new("Frame", joystickFrame)
-jCenter.Size = UDim2.new(0, 48, 0, 48)
-jCenter.Position = UDim2.new(0.5, -24, 0.5, -24)
-jCenter.BackgroundColor3 = C.accent
-jCenter.BorderSizePixel = 0
-jCenter.ZIndex = 2
-Instance.new("UICorner", jCenter).CornerRadius = UDim.new(1, 0)
-
-local jLabel = Instance.new("TextLabel", joystickFrame)
-jLabel.Size = UDim2.new(1, 0, 0, 12)
-jLabel.Position = UDim2.new(0, 0, 1, 4)
-jLabel.Text = "🚀 3D JETPACK"
-jLabel.TextColor3 = C.cyan
-jLabel.TextSize = 8
-jLabel.Font = Enum.Font.GothamBold
-jLabel.BackgroundTransparency = 1
-
-local maxRadius = 42
-local draggingStick = false
-
-local function getStickCenter()
-	local abs = joystickFrame.AbsolutePosition
-	local size = joystickFrame.AbsoluteSize
-	return Vector2.new(abs.X + size.X * 0.5, abs.Y + size.Y * 0.5)
-end
-
-local function updateStickPosition(inputPos)
-	local center = getStickCenter()
-	local delta = Vector2.new(inputPos.X - center.X, inputPos.Y - center.Y)
-	local dist = delta.Magnitude
-	if dist > maxRadius then
-		delta = delta.Unit * maxRadius
-	end
-	jCenter.Position = UDim2.new(0.5, delta.X - 24, 0.5, delta.Y - 24)
-	jetpackInputVector = Vector2.new(delta.X / maxRadius, -(delta.Y / maxRadius))
-end
-
-local function resetStickPosition()
-	draggingStick = false
-	stickTouchId = nil
-	jCenter.Position = UDim2.new(0.5, -24, 0.5, -24)
-	jetpackInputVector = Vector2.zero
-end
-
--- Stick input: HANYA di area joystickFrame, track input object
-joystickFrame.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch then
-		-- Jangan ambil input di drag handle
-		local pos = input.Position
-		local handleAbs = dragHandle.AbsolutePosition
-		local handleSize = dragHandle.AbsoluteSize
-		if pos.X >= handleAbs.X and pos.X <= handleAbs.X + handleSize.X
-			and pos.Y >= handleAbs.Y and pos.Y <= handleAbs.Y + handleSize.Y then
-			return
-		end
-		draggingStick = true
-		stickTouchId = input
-		updateStickPosition(pos)
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if not draggingStick then return end
-	-- Hanya ikuti input yang sama (anti multi-touch geser)
-	if stickTouchId and input ~= stickTouchId
-		and input.UserInputType ~= Enum.UserInputType.MouseMovement then
-		return
-	end
-	if input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch then
-		updateStickPosition(input.Position)
-	end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-	if not draggingStick then return end
-	-- Hanya reset kalau input yang memegang stick yang lepas
-	if input == stickTouchId
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		resetStickPosition()
-	end
-end)
-
--- Drag HANYA via handle (bukan whole joystick) — fix geser-geser di HP
-do
-	local d, s, p
-	dragHandle.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			d = true
-			s = input.Position
-			p = joystickFrame.Position
-		end
-	end)
-	dragHandle.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			d = false
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if d and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - s
-			joystickFrame.Position = UDim2.new(p.X.Scale, p.X.Offset + delta.X, p.Y.Scale, p.Y.Offset + delta.Y)
-		end
-	end)
-end
-
--- Sidebar
-speedBtn.MouseButton1Click:Connect(function()
-	speedOn = not speedOn
-	setSpeedVis(speedOn)
-	if speedOn then hookSpeed() else unhookSpeed() end
-end)
-
-jetpackBtn.MouseButton1Click:Connect(function()
-	if jetpackOn then
-		disableJetpack()
-		setJetpackVis(false)
-		joystickFrame.Visible = false
-	else
-		enableJetpack()
-		setJetpackVis(true)
-		joystickFrame.Visible = true
-	end
-end)
-
+-- Sidebar Navigation
 radarBtn.MouseButton1Click:Connect(function()
+	setRadarVis(true)
 	setSettingsVis(false)
 	radarPage.Visible = true
 	settingsPage.Visible = false
-	refreshRadarToggle()
 end)
 
 settingsBtn.MouseButton1Click:Connect(function()
+	setRadarVis(false)
 	setSettingsVis(true)
 	radarPage.Visible = false
 	settingsPage.Visible = true
 end)
 
+-- Minimize Bubble
 local miniBubble = Instance.new("TextButton", screenGui)
 miniBubble.Size = UDim2.new(0, 46, 0, 46)
 miniBubble.Position = UDim2.new(0, 15, 0.5, -23)
@@ -1395,6 +1118,7 @@ miniBubble.MouseButton1Click:Connect(function()
 	miniBubble.Visible = false
 end)
 
+-- Drag System
 local function makeDraggable(frame)
 	local dragging, dragStart, startPos = false, nil, nil
 	frame.InputBegan:Connect(function(input)
@@ -1419,7 +1143,6 @@ end
 
 makeDraggable(outer)
 makeDraggable(miniBubble)
--- joystickFrame TIDAK makeDraggable penuh (hanya handle) → fix HP
 
 function updateFilterStatus()
 	local parts = {}
@@ -1432,7 +1155,7 @@ function updateFilterStatus()
 	local cCount = 0
 	for _ in pairs(selectedCategories) do cCount += 1 end
 	if cCount > 0 then table.insert(parts, cCount .. " Kategori") end
-	filterStatus.Text = #parts > 0 and ("Filter: " .. table.concat(parts, " | ")) or "Filter: SEMUA NONAKTIF"
+	filterStatus.Text = #parts > 0 and ("Filter Aktif: " .. table.concat(parts, " | ")) or "Filter: SEMUA NONAKTIF"
 end
 
 local function refreshToggles()
@@ -1451,9 +1174,11 @@ resetBtn.MouseButton1Click:Connect(function()
 	if radarOn then task.defer(function() pcall(scanRealTime) end) end
 end)
 
+-- Initial Execution
 updateFilterStatus()
 refreshToggles()
 refreshRadarToggle()
+setRadarVis(true)
 if localPlayer.Character then hookAntiDamage(localPlayer.Character) end
 
-print("❄ GEC MINE ANTARCTICA V4.01 FIXED | Lag↓ FPS↑ Jetpack HP stable")
+print("❄ GEC MINE ANTARCTICA V5.0 | Radar 140M Fast Scan | Lag Spike Fixed | Anti-Slip Lightweight")
