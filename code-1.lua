@@ -1,9 +1,10 @@
 -- =================================================================
--- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V5.0 (FINAL ULTRA-CLEAN)
--- • Radius Radar Strict 140M (Super Ringan & Instan Fast-Scan)
--- • Zero-Lag FPS Optimizer (Bebas Lag Spike & Hemat Baterai)
--- • Smooth Anti-Slip & Godmode Anti-Damage (Karakter Ringan/Lincah)
--- • Instant Proximity Interaction & Lightweight Crystals (0.1)
+-- GEC MINE ANTARCTICA — HYPERDRIVE QUANTUM V5.5 (ULTRA OPTIMIZED)
+-- • Radius Radar Strict 140M (Zero Lag & Manhattan Culling)
+-- • Instant Mine Engine (100% Fast Break & Multi-Hit Toggle)
+-- • Filter Rarity Baru "Ekzotis / Eksotis"
+-- • Extreme Lag Spike Fix & Memory Leak Eliminator
+-- • Smooth Anti-Slip & Godmode Anti-Damage
 -- =================================================================
 
 local EXPECTED_KEY = "Jack"
@@ -34,12 +35,13 @@ local CONFIG = {
 	radarIntervalIdle = 0.15,
 	radarIntervalMove = 0.05,
 	moveThresholdSq = 1.0,
-	maxMarkers = 25,
+	maxMarkers = 20,
 	cleanupInterval = 3.0,
 	lightWeightValue = 0.1,
 	safeFallVelocity = -35,
 	voidThresholdY = -70,
-	ingestBatch = 200,
+	ingestBatch = 120,
+	mineReachDist = 20,
 }
 
 local AI_WEIGHTS = {
@@ -58,11 +60,12 @@ local AI_WEIGHTS = {
 
 local RARITIES = {"Exotic", "Legendary", "Rare", "Uncommon", "Common", "Epic", "Mythic"}
 local RARITY_UI_LABELS = {
-	Exotic = "Eksotis", Legendary = "Legendaris", Rare = "Langka",
+	Exotic = "Ekzotis", Legendary = "Legendaris", Rare = "Langka",
 	Uncommon = "Tidak Biasa", Common = "Biasa", Epic = "Epik", Mythic = "Mistik",
 }
 local RARITY_ALIASES = {
-	exotic = "Exotic", eksotis = "Exotic", legendary = "Legendary", legendaris = "Legendary",
+	exotic = "Exotic", eksotis = "Exotic", ekzotis = "Exotic",
+	legendary = "Legendary", legendaris = "Legendary",
 	rare = "Rare", langka = "Rare", uncommon = "Uncommon", ["tidak biasa"] = "Uncommon",
 	common = "Common", biasa = "Common", epic = "Epic", epik = "Epic",
 	mythic = "Mythic", mistik = "Mythic",
@@ -91,10 +94,12 @@ local C = {
 	textMain = Color3.fromRGB(235, 238, 245), textSub = Color3.fromRGB(130, 136, 148),
 }
 
+-- State Variables
 local radarOn = false
 local boosterOn = false
 local lightWeightOn = false
 local antiDamageOn = true
+local instantMineOn = false
 
 local selectedRarities = {}
 local selectedCategories = {}
@@ -104,6 +109,7 @@ local targetRegistry = {}
 local targetList = {}
 local activeMarkers = {}
 
+-- Object Pool Highlights
 local highlightPool = table.create(CONFIG.maxMarkers + 2)
 for i = 1, CONFIG.maxMarkers + 2 do
 	local hl = Instance.new("Highlight")
@@ -115,7 +121,7 @@ for i = 1, CONFIG.maxMarkers + 2 do
 	highlightPool[i] = hl
 end
 
-local MAX_FOUND_BUFFER = 48
+local MAX_FOUND_BUFFER = 36
 local foundSlots = table.create(MAX_FOUND_BUFFER)
 for i = 1, MAX_FOUND_BUFFER do
 	foundSlots[i] = {part = nil, data = nil, distSq = 0, aiScore = 0}
@@ -247,8 +253,9 @@ local function isCrystalTarget(obj)
 end
 
 local RARITY_ALIAS_ORDER = {
-	"tidak biasa", "legendaris", "uncommon", "legendary", "eksotis",
-	"exotic", "mythic", "mistik", "langka", "biasa", "common", "epik", "rare", "epic",
+	"tidak biasa", "legendaris", "uncommon", "legendary",
+	"ekzotis", "eksotis", "exotic", "mythic", "mistik",
+	"langka", "biasa", "common", "epik", "rare", "epic",
 }
 
 local function getRarityName(part)
@@ -332,6 +339,35 @@ local function applyLightWeight(obj)
 	end)
 end
 
+-- ==================== INSTANT MINE & PICKUP ENGINE ====================
+local processedPrompts = setmetatable({}, { __mode = "k" })
+
+local function applyInstantMine(obj)
+	if not obj then return end
+	pcall(function()
+		-- Set health/hits attribute to break instant
+		if instantMineOn then
+			if obj:GetAttribute("Health") ~= nil then obj:SetAttribute("Health", 0) end
+			if obj:GetAttribute("Hp") ~= nil then obj:SetAttribute("Hp", 0) end
+			if obj:GetAttribute("HitsLeft") ~= nil then obj:SetAttribute("HitsLeft", 0) end
+			local hpVal = obj:FindFirstChild("Health") or obj:FindFirstChild("Hp")
+			if hpVal and (hpVal:IsA("NumberValue") or hpVal:IsA("IntValue")) then hpVal.Value = 0 end
+		end
+	end)
+end
+
+local function processPrompt(obj)
+	if not obj or not obj:IsA("ProximityPrompt") or processedPrompts[obj] then return end
+	processedPrompts[obj] = true
+	pcall(function()
+		obj.HoldDuration = 0
+		obj.RequiresLineOfSight = false
+		if instantMineOn then
+			obj.MaxActivationDistance = math.max(obj.MaxActivationDistance, CONFIG.mineReachDist)
+		end
+	end)
+end
+
 local function registerTarget(obj)
 	if not obj or isForbiddenObject(obj) then return end
 	local ok, part = pcall(getWorldPart, obj)
@@ -354,6 +390,7 @@ local function registerTarget(obj)
 	targetRegistry[part] = data
 	table.insert(targetList, data)
 	if lightWeightOn then applyLightWeight(obj) end
+	if instantMineOn then applyInstantMine(obj) end
 end
 
 local function unregisterTarget(part)
@@ -368,18 +405,7 @@ local function unregisterTarget(part)
 	end
 end
 
--- ==================== INSTANT PICKUP ====================
-local processedPrompts = setmetatable({}, { __mode = "k" })
-local function processPrompt(obj)
-	if not obj or not obj:IsA("ProximityPrompt") or processedPrompts[obj] then return end
-	processedPrompts[obj] = true
-	pcall(function()
-		obj.HoldDuration = 0
-		obj.RequiresLineOfSight = false
-	end)
-end
-
--- Ingest Workspace
+-- Smooth Timesliced Workspace Ingestion (Zero Lag Spike)
 task.spawn(function()
 	local ok, desc = pcall(function() return Workspace:GetDescendants() end)
 	if not ok or not desc then return end
@@ -412,6 +438,58 @@ end)
 Workspace.DescendantRemoving:Connect(function(obj)
 	if obj and obj:IsA("BasePart") then pcall(unregisterTarget, obj) end
 end)
+
+-- Tool Auto-Hit / Instant-Mine Hook
+local function hookTool(tool)
+	if not tool or not tool:IsA("Tool") then return end
+	tool.Activated:Connect(function()
+		if not instantMineOn then return end
+		local char = localPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local pPos = hrp.Position
+		local reachSq = CONFIG.mineReachDist * CONFIG.mineReachDist
+		for i = 1, #targetList do
+			local data = targetList[i]
+			local part = data and data.part
+			if part and part.Parent then
+				local pos = part.Position
+				local dx, dy, dz = pos.X - pPos.X, pos.Y - pPos.Y, pos.Z - pPos.Z
+				if (dx * dx + dy * dy + dz * dz) <= reachSq then
+					applyInstantMine(part)
+					if part.Parent then applyInstantMine(part.Parent) end
+					for _, pr in ipairs(part:GetDescendants()) do
+						if pr:IsA("ProximityPrompt") then
+							pcall(function()
+								pr.HoldDuration = 0
+								if fireproximityprompt then fireproximityprompt(pr, 0) end
+							end)
+						end
+					end
+				end
+			end
+		end
+	end)
+end
+
+local function hookCharacterTools(char)
+	if not char then return end
+	char.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then hookTool(child) end
+	end)
+	for _, child in ipairs(char:GetChildren()) do
+		if child:IsA("Tool") then hookTool(child) end
+	end
+	local bp = localPlayer:FindFirstChild("Backpack")
+	if bp then
+		bp.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") then hookTool(child) end
+		end)
+		for _, child in ipairs(bp:GetChildren()) do
+			if child:IsA("Tool") then hookTool(child) end
+		end
+	end
+end
 
 -- ==================== FAST AI RADAR (140M STRICT) ====================
 local function passesFilter(data)
@@ -472,7 +550,7 @@ local function scanRealTime()
 			local pos = part.Position
 			local dx = pos.X - ox
 			local dz = pos.Z - oz
-			-- Manhattan Culling (Super Fast early exit)
+			-- Manhattan Culling (Fast Exit)
 			if math.abs(dx) <= radius and math.abs(dz) <= radius then
 				local dy = pos.Y - oy
 				if math.abs(dy) <= radius then
@@ -557,14 +635,13 @@ local function applyCharacterPhysics(char, hum)
 	if not char then return end
 	local hrp = char:FindFirstChild("HumanoidRootPart")
 	if hrp then
-		-- Physics alami: tidak berat, tidak seret
 		pcall(function()
 			hrp.CustomPhysicalProperties = PhysicalProperties.new(1.0, 1.2, 0, 10, 10)
 		end)
 	end
 	if hum then
 		pcall(function()
-			hum.MaxSlopeAngle = 89.5 -- Bebas daki tebing tanpa terpeleset
+			hum.MaxSlopeAngle = 89.5
 			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 		end)
@@ -581,8 +658,9 @@ local function hookAntiDamage(char)
 	lastHealth = hum.Health
 	lastSafeGroundCFrame = hrp.CFrame
 	applyCharacterPhysics(char, hum)
+	hookCharacterTools(char)
 
-	-- Godmode: Cegah HP berkurang
+	-- Godmode HP Protection
 	table.insert(antiConn, hum.HealthChanged:Connect(function(newHealth)
 		if not antiDamageOn then return end
 		if newHealth < lastHealth and newHealth > 0 then
@@ -591,7 +669,7 @@ local function hookAntiDamage(char)
 		lastHealth = math.max(hum.Health, hum.MaxHealth)
 	end))
 
-	-- Physics Tick: Anti Void & Anti Fall-Damage Softlanding
+	-- Physics Fall & Void Protection
 	table.insert(antiConn, RunService.PreSimulation:Connect(function()
 		if not antiDamageOn then return end
 		local c = localPlayer.Character
@@ -602,7 +680,6 @@ local function hookAntiDamage(char)
 		local pos = root.Position
 		local vel = root.AssemblyLinearVelocity
 
-		-- Deteksi pijakan tanah
 		groundRayParams.FilterDescendantsInstances = {c}
 		local rayResult = Workspace:Raycast(pos, Vector3.new(0, -6, 0), groundRayParams)
 		local isGrounded = rayResult ~= nil or h.FloorMaterial ~= Enum.Material.Air
@@ -612,13 +689,11 @@ local function hookAntiDamage(char)
 				lastSafeGroundCFrame = root.CFrame
 			end
 		else
-			-- Redam kecepatan jatuh bebas agar saat bentur tanah tidak instakill
 			if vel.Y < CONFIG.safeFallVelocity then
 				root.AssemblyLinearVelocity = Vector3.new(vel.X, CONFIG.safeFallVelocity, vel.Z)
 			end
 		end
 
-		-- Selamatkan dari jurang/void
 		if pos.Y < CONFIG.voidThresholdY and lastSafeGroundCFrame then
 			pcall(function()
 				root.CFrame = lastSafeGroundCFrame + Vector3.new(0, 3, 0)
@@ -649,7 +724,7 @@ localPlayer.CharacterAdded:Connect(function(char)
 	if antiDamageOn then hookAntiDamage(char) end
 end)
 
--- Heartbeat Radar Engine
+-- Optimized Heartbeat Radar
 RunService.Heartbeat:Connect(function()
 	local now = os.clock()
 	if radarOn and not scanRunning then
@@ -657,8 +732,8 @@ RunService.Heartbeat:Connect(function()
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
 		if hrp then
 			local pos = hrp.Position
-			local delta = (pos - lastHrpPos).Magnitude
-			isMoving = (delta * delta) > CONFIG.moveThresholdSq
+			local dx, dy, dz = pos.X - lastHrpPos.X, pos.Y - lastHrpPos.Y, pos.Z - lastHrpPos.Z
+			isMoving = (dx * dx + dy * dy + dz * dz) > CONFIG.moveThresholdSq
 			if isMoving then lastHrpPos = pos end
 		end
 		local interval = isMoving and CONFIG.radarIntervalMove or CONFIG.radarIntervalIdle
@@ -681,7 +756,7 @@ RunService.Heartbeat:Connect(function()
 	end
 end)
 
--- ==================== CLEAN POTATO FPS OPTIMIZER ====================
+-- ==================== POTATO FPS OPTIMIZER ====================
 local boosterBackup = { effects = {}, savedSettings = {} }
 
 local function enableGameBooster()
@@ -782,7 +857,7 @@ tbFix.BorderSizePixel = 0
 local titleLabel = Instance.new("TextLabel", titleBar)
 titleLabel.Size = UDim2.new(1, -55, 1, 0)
 titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Text = "❄ GEC MINE ANTARCTICA • HYPERDRIVE V5.0"
+titleLabel.Text = "❄ GEC MINE ANTARCTICA • HYPERDRIVE V5.5"
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.TextSize = 11
 titleLabel.Font = Enum.Font.GothamBold
@@ -800,7 +875,7 @@ minBtn.TextSize = 10
 minBtn.BorderSizePixel = 0
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
 
--- Sidebar Tabs (Clean 2 Menu: Radar & Settings)
+-- Sidebar Tabs
 local leftCol = Instance.new("Frame", outer)
 leftCol.Size = UDim2.new(0, 48, 1, -42)
 leftCol.Position = UDim2.new(0, 6, 0, 36)
@@ -935,7 +1010,7 @@ local function makeFilterButton(name, color, getState, setState)
 end
 
 for _, rarity in ipairs(RARITIES) do
-	makeFilterButton(RARITY_UI_LABELS[rarity], RARITY_COLORS[rarity],
+	makeFilterButton(RARITY_UI_LABELS[rarity] or rarity, RARITY_COLORS[rarity],
 		function() return selectedRarities[rarity] == true end,
 		function() selectedRarities[rarity] = not selectedRarities[rarity] or nil end)
 end
@@ -1001,12 +1076,24 @@ pTitle.Font = Enum.Font.GothamBold
 pTitle.TextXAlignment = Enum.TextXAlignment.Left
 pTitle.BackgroundTransparency = 1
 
-local function makeSettingCard(parent, y, title, subtitle)
-	local card = Instance.new("Frame", parent)
-	card.Size = UDim2.new(1, 0, 0, 44)
-	card.Position = UDim2.new(0, 0, 0, y)
+local setScroll = Instance.new("ScrollingFrame", settingsPage)
+setScroll.Size = UDim2.new(1, 0, 1, -20)
+setScroll.Position = UDim2.new(0, 0, 0, 20)
+setScroll.BackgroundTransparency = 1
+setScroll.BorderSizePixel = 0
+setScroll.ScrollBarThickness = 2
+setScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+local setListLayout = Instance.new("UIListLayout", setScroll)
+setListLayout.Padding = UDim.new(0, 6)
+setListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function makeSettingCard(title, subtitle, layoutOrder)
+	local card = Instance.new("Frame", setScroll)
+	card.Size = UDim2.new(1, -4, 0, 44)
 	card.BackgroundColor3 = C.black
 	card.BorderSizePixel = 0
+	card.LayoutOrder = layoutOrder or 1
 	Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
 
 	local info = Instance.new("TextLabel", card)
@@ -1033,7 +1120,30 @@ local function makeSettingCard(parent, y, title, subtitle)
 	return btn
 end
 
-local boosterToggleBtn = makeSettingCard(settingsPage, 22, "⚡ POTATO FPS (ZERO SPIKE)", "Matikan Efek & Hemat Baterai")
+-- Setting Cards
+local mineToggleBtn = makeSettingCard("⛏ INSTANT MINE (100% CEPAT)", "Auto Break & Instant Multi-Hit", 1)
+mineToggleBtn.Text = "MINE OFF"
+mineToggleBtn.MouseButton1Click:Connect(function()
+	instantMineOn = not instantMineOn
+	if instantMineOn then
+		mineToggleBtn.Text = "MINE ON"
+		mineToggleBtn.BackgroundColor3 = C.green
+		for _, data in ipairs(targetList) do
+			if data.part then applyInstantMine(data.part) end
+		end
+		for obj in pairs(processedPrompts) do
+			if obj:IsA("ProximityPrompt") then
+				obj.HoldDuration = 0
+				obj.MaxActivationDistance = math.max(obj.MaxActivationDistance, CONFIG.mineReachDist)
+			end
+		end
+	else
+		mineToggleBtn.Text = "MINE OFF"
+		mineToggleBtn.BackgroundColor3 = C.red
+	end
+end)
+
+local boosterToggleBtn = makeSettingCard("⚡ POTATO FPS (ZERO SPIKE)", "Matikan Efek & Hemat Baterai", 2)
 boosterToggleBtn.Text = "BOOST OFF"
 boosterToggleBtn.MouseButton1Click:Connect(function()
 	boosterOn = not boosterOn
@@ -1048,7 +1158,7 @@ boosterToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local weightToggleBtn = makeSettingCard(settingsPage, 72, "🪶 LIGHTWEIGHT CRYSTALS", "Set Weight Crystal = 0.1")
+local weightToggleBtn = makeSettingCard("🪶 LIGHTWEIGHT CRYSTALS", "Set Weight Crystal = 0.1", 3)
 weightToggleBtn.Text = "LIGHT OFF"
 weightToggleBtn.MouseButton1Click:Connect(function()
 	lightWeightOn = not lightWeightOn
@@ -1064,7 +1174,7 @@ weightToggleBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-local antiToggleBtn = makeSettingCard(settingsPage, 122, "🛡 ANTI DAMAGE & ANTI SLIP", "Kebal Jatuh, Anti-Void & Daki Tebing")
+local antiToggleBtn = makeSettingCard("🛡 ANTI DAMAGE & ANTI SLIP", "Kebal Jatuh, Anti-Void & Daki Tebing", 4)
 antiToggleBtn.Text = "ANTI ON"
 antiToggleBtn.BackgroundColor3 = C.green
 antiToggleBtn.MouseButton1Click:Connect(function()
@@ -1118,7 +1228,7 @@ miniBubble.MouseButton1Click:Connect(function()
 	miniBubble.Visible = false
 end)
 
--- Drag System
+-- Draggable Logic
 local function makeDraggable(frame)
 	local dragging, dragStart, startPos = false, nil, nil
 	frame.InputBegan:Connect(function(input)
@@ -1181,4 +1291,4 @@ refreshRadarToggle()
 setRadarVis(true)
 if localPlayer.Character then hookAntiDamage(localPlayer.Character) end
 
-print("❄ GEC MINE ANTARCTICA V5.0 | Radar 140M Fast Scan | Lag Spike Fixed | Anti-Slip Lightweight")
+print("❄ GEC MINE ANTARCTICA V5.5 | Instant Mine ON/OFF | Ekzotis Filter Added | Ultra Zero Lag Loaded!")
