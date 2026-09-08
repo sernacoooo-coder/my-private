@@ -26,10 +26,24 @@ class AtlasPersistenceTests(unittest.TestCase):
 
     def test_multiview_descriptor_handles_tiny_image(self):
         vector = app.visual_vector(Image.new("RGB", (1, 1), (30, 120, 220)))
-        self.assertEqual(vector.shape, (190,))
+        self.assertEqual(vector.shape, (2638,))
         self.assertTrue(np.isfinite(vector).all())
         self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=5)
         self.assertEqual(len(app._views(Image.new("RGB", (8, 8), (10, 20, 30)))), 9)
+
+    def test_descriptor_preserves_local_pixel_detail(self):
+        original = Image.new("RGB", (128, 128), (80, 120, 160))
+        changed = original.copy()
+        changed.paste((240, 30, 20), (48, 48, 80, 80))
+
+        distance = np.linalg.norm(app.visual_vector(original) - app.visual_vector(changed))
+
+        self.assertGreater(float(distance), 0.05)
+
+    def test_map_links_encode_coordinates(self):
+        google, osm = app.map_links(-6.2088, 106.8456)
+        self.assertIn("-6.208800%2C106.845600", google)
+        self.assertIn("mlat=-6.208800&mlon=106.845600", osm)
 
     def test_confidence_is_bounded(self):
         first = app.Sample("a__0_0.jpg", 0.0, 0.0, [1.0, 0.0])
@@ -55,9 +69,10 @@ class AtlasPersistenceTests(unittest.TestCase):
         reloaded_index, reloaded_samples = app.load_atlas()
         self.assertEqual(reloaded_index.ntotal, 3)
         self.assertEqual([sample.name for sample in reloaded_samples], ["a__0_0.jpg", "b__1_1.jpg", "c__2_2.jpg"])
-        prediction = app.predict(np.asarray([1.0, 0.0], dtype=np.float32), reloaded_samples, reloaded_index, neighbours=1)
+        prediction = app.predict(np.asarray([1.0, 0.0], dtype=np.float32), reloaded_samples, reloaded_index)
         self.assertAlmostEqual(prediction[0], 0.0, places=3)
         self.assertAlmostEqual(prediction[1], 0.0, places=3)
+        self.assertEqual(len(prediction[3]), 1)
 
         app.INDEX_PATH.write_bytes(b"broken-index")
         recovered_index, recovered_samples = app.load_atlas()
